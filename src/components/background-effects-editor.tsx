@@ -1,10 +1,12 @@
 
 import * as React from "react";
-import { ChevronsLeft, ChevronsRight, Scissors, Plus, Minus, MousePointer, ZoomIn } from "lucide-react";
+import { ChevronsLeft, ChevronsRight, Scissors, Plus, Minus, MousePointer, ZoomIn, Camera } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ExportPanel } from "./export-panel";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 
 interface BackgroundEffectProp {
   duration: number;
@@ -24,6 +26,14 @@ interface BackgroundEffectProp {
   exportProgress: number;
   showMenu: boolean;
   setShowMenu: (showMenu: boolean) => void;
+
+  cameraOverlayAvailable?: boolean;
+  cameraOverlayEnabled?: boolean;
+  setCameraOverlayEnabled?: (v: boolean) => void;
+  cameraOverlayShape?: "rect" | "circle";
+  setCameraOverlayShape?: (v: "rect" | "circle") => void;
+  cameraOverlaySizePct?: number;
+  setCameraOverlaySizePct?: (v: number) => void;
 }
 
 export function BackgroundEffectEditor({
@@ -40,7 +50,14 @@ export function BackgroundEffectEditor({
   zoomDuration,
   setZoomDuration,
   showMenu,
-  setShowMenu
+  setShowMenu,
+  cameraOverlayAvailable,
+  cameraOverlayEnabled,
+  setCameraOverlayEnabled,
+  cameraOverlayShape,
+  setCameraOverlayShape,
+  cameraOverlaySizePct,
+  setCameraOverlaySizePct,
 }: BackgroundEffectProp) {
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -97,6 +114,65 @@ export function BackgroundEffectEditor({
 
         <TabsContent value="effects" className="mt-0">
           <div className="space-y-4">
+            {cameraOverlayAvailable ? (
+              <div className="flex flex-col space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium flex items-center gap-2">
+                    <Camera className="h-4 w-4" />
+                    Camera Overlay
+                  </h3>
+                  {setCameraOverlayEnabled ? (
+                    <div className="flex items-center gap-2">
+                      <Label className="text-xs text-muted-foreground">Show</Label>
+                      <Switch
+                        checked={Boolean(cameraOverlayEnabled)}
+                        onCheckedChange={(v) => setCameraOverlayEnabled(v)}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+
+                {cameraOverlayEnabled ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant={cameraOverlayShape === "rect" ? "default" : "outline"}
+                        size="sm"
+                        className="flex-1"
+                        onClick={() => setCameraOverlayShape?.("rect")}
+                      >
+                        Rectangle
+                      </Button>
+                      <Button
+                        variant={cameraOverlayShape === "circle" ? "default" : "outline"}
+                        size="sm"
+                        className="flex-1"
+                        onClick={() => setCameraOverlayShape?.("circle")}
+                      >
+                        Circle
+                      </Button>
+                    </div>
+
+                    {typeof cameraOverlaySizePct === "number" && setCameraOverlaySizePct ? (
+                      <div className="flex flex-col space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <span>Size</span>
+                          <span>{cameraOverlaySizePct}%</span>
+                        </div>
+                        <Slider
+                          value={[cameraOverlaySizePct]}
+                          min={12}
+                          max={40}
+                          step={1}
+                          onValueChange={([v]) => setCameraOverlaySizePct(v)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="flex flex-col space-y-2">
               <h3 className="text-sm font-medium">Zoom on Click</h3>
               <div className="flex items-center space-x-4">

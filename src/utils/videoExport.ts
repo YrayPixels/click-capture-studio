@@ -358,7 +358,12 @@ export const exportVideo = async (
   videoContainer: HTMLElement,
   format: string,
   quality: string,
-  onProgress: (progress: number) => void
+  onProgress: (progress: number) => void,
+  options?: {
+    cameraVideoEl?: HTMLVideoElement | null;
+    cameraOverlayEl?: HTMLElement | null;
+    cameraShape?: "rect" | "circle";
+  }
 ): Promise<void> => {
   try {
     if (!videoRef || !videoContainer) {
@@ -475,6 +480,10 @@ export const exportVideo = async (
     const videoPositionY = videoRect.top - containerRect.top;
     const videoWidth = videoRef.offsetWidth;
     const videoHeight = videoRef.offsetHeight;
+
+    const overlayEl = options?.cameraOverlayEl ?? null;
+    const cameraEl = options?.cameraVideoEl ?? null;
+    const cameraShape = options?.cameraShape ?? "rect";
 
     // Store original video styles
     const originalVideoStyles = {
@@ -647,6 +656,33 @@ export const exportVideo = async (
               scaledVideoWidth,
               scaledVideoHeight
             );
+
+            // Draw camera overlay on top (if present).
+            if (overlayEl && cameraEl) {
+              const overlayRect = overlayEl.getBoundingClientRect();
+              const overlayX = overlayRect.left - containerRect.left;
+              const overlayY = overlayRect.top - containerRect.top;
+              const overlayW = overlayRect.width;
+              const overlayH = overlayRect.height;
+
+              if (overlayW > 2 && overlayH > 2) {
+                const sx = overlayX * scaleFactor;
+                const sy = overlayY * scaleFactor;
+                const sw = overlayW * scaleFactor;
+                const sh = overlayH * scaleFactor;
+
+                ctx.save();
+                if (cameraShape === "circle") {
+                  const r = Math.min(sw, sh) / 2;
+                  ctx.beginPath();
+                  ctx.arc(sx + sw / 2, sy + sh / 2, r, 0, Math.PI * 2);
+                  ctx.closePath();
+                  ctx.clip();
+                }
+                ctx.drawImage(cameraEl, sx, sy, sw, sh);
+                ctx.restore();
+              }
+            }
 
             // Request next frame
             requestAnimationFrame(captureFrame);

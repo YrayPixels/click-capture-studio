@@ -4,7 +4,11 @@ import { ChevronLeft, Play, Save, Pause } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MainNav } from "@/components/main-nav";
 import { BackgroundEffectEditor } from "@/components/background-effects-editor";
-import { CapcutTimelineEditor, type CapcutSegment } from "@/components/capcut-timeline-editor";
+import {
+  CapcutTimelineEditor,
+  type CapcutSegment,
+  type TimelineClickMarker,
+} from "@/components/capcut-timeline-editor";
 import { toast } from "sonner";
 import { screenRecordingService, type ClickEvent } from "@/services/screen-recording";
 import { backgrounds } from "@/services/color";
@@ -35,6 +39,7 @@ export default function CapcutEditor() {
   const { id } = useParams<{ id: string }>();
 
   const [videoUrl, setVideoUrl] = React.useState<string | null>(null);
+  const [cameraVideoUrl, setCameraVideoUrl] = React.useState<string | null>(null);
   const [videoDuration, setVideoDuration] = React.useState(0); // source duration (seconds)
 
   const [outputTime, setOutputTime] = React.useState(0); // stitched timeline time (seconds)
@@ -63,6 +68,10 @@ export default function CapcutEditor() {
     ClickEventStitched[]
   >([]);
 
+  const clickMarkers = React.useMemo<TimelineClickMarker[]>(() => {
+    return clickEventsStitched.map((e) => ({ id: e.id, tOut: e.tOut }));
+  }, [clickEventsStitched]);
+
   const [selectedBackground, setSelectedBackground] = React.useState(0);
   const [padding, setPadding] = React.useState(100);
 
@@ -71,10 +80,17 @@ export default function CapcutEditor() {
 
   const [showMenu, setShowMenu] = React.useState(true);
 
+  const [cameraOverlayEnabled, setCameraOverlayEnabled] = React.useState(true);
+  const [cameraOverlayShape, setCameraOverlayShape] = React.useState<"rect" | "circle">(
+    "rect"
+  );
+  const [cameraOverlaySizePct, setCameraOverlaySizePct] = React.useState(22);
+
   const [isExporting, setIsExporting] = React.useState(false);
   const [exportProgress, setExportProgress] = React.useState(0);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const cameraVideoRef = React.useRef<HTMLVideoElement>(null);
   const videoContainerRef = React.useRef<HTMLDivElement>(null);
   const zoomFrameRef = React.useRef<HTMLDivElement>(null);
 
@@ -102,6 +118,7 @@ export default function CapcutEditor() {
       if (recordingVideoUrl) {
         setVideoUrl(recordingVideoUrl);
         setClickEventsSource(screenRecordingService.getClickEvents());
+        setCameraVideoUrl(screenRecordingService.getRecordingCameraVideoUrl());
       } else {
         toast.error("No recording found. Please record a video first.");
       }
@@ -112,6 +129,14 @@ export default function CapcutEditor() {
       setVideoUrl(`/videos/${id}`);
     }
   }, [id]);
+
+  React.useEffect(() => {
+    if (!cameraVideoUrl) return;
+    if (!cameraVideoRef.current) return;
+    cameraVideoRef.current.src = cameraVideoUrl;
+    cameraVideoRef.current.muted = true;
+    cameraVideoRef.current.playsInline = true;
+  }, [cameraVideoUrl]);
 
   React.useEffect(() => {
     if (!videoUrl) return;
@@ -285,10 +310,13 @@ export default function CapcutEditor() {
 
     isSeekingRef.current = true;
     videoRef.current.currentTime = src;
+    if (cameraVideoRef.current && cameraVideoUrl) {
+      cameraVideoRef.current.currentTime = src;
+    }
     requestAnimationFrame(() => {
       isSeekingRef.current = false;
     });
-  }, [segments, outputDuration, outputTime, getSourceTimeFromOutputTime]);
+  }, [cameraVideoUrl, getSourceTimeFromOutputTime, outputDuration, outputTime, segments]);
 
   const activeZoomClick = React.useMemo(() => {
     if (zoomMode === "off" || zoomDuration <= 0) return null;
@@ -485,7 +513,11 @@ export default function CapcutEditor() {
     if (!videoRef.current) return;
 
     isSeekingRef.current = true;
-    videoRef.current.currentTime = getSourceTimeFromOutputTime(nextOut);
+    const src = getSourceTimeFromOutputTime(nextOut);
+    videoRef.current.currentTime = src;
+    if (cameraVideoRef.current && cameraVideoUrl) {
+      cameraVideoRef.current.currentTime = src;
+    }
     requestAnimationFrame(() => {
       isSeekingRef.current = false;
     });
@@ -552,7 +584,16 @@ export default function CapcutEditor() {
         videoContainerRef.current,
         format,
         quality,
-        (progress) => setExportProgress(progress)
+        (progress) => setExportProgress(progress),
+        {
+          cameraVideoEl:
+            cameraOverlayEnabled && cameraVideoUrl ? cameraVideoRef.current : null,
+          cameraOverlayEl:
+            cameraOverlayEnabled && cameraVideoUrl
+              ? (document.getElementById("camera-overlay") as HTMLElement | null)
+              : null,
+          cameraShape: cameraOverlayShape,
+        }
       );
 
       setIsExporting(false);
@@ -567,6 +608,7 @@ export default function CapcutEditor() {
     if (!videoRef.current) return;
     if (isPlaying) {
       videoRef.current.pause();
+      cameraVideoRef.current?.pause();
       setIsPlaying(false);
     } else {
       // Ensure playback always follows the current stitched segment order.
@@ -584,9 +626,22 @@ export default function CapcutEditor() {
       }
 
       videoRef.current.play();
+      if (cameraOverlayEnabled && cameraVideoUrl) {
+        try {
+          void cameraVideoRef.current?.play();
+        } catch {
+          // ignore
+        }
+      }
       setIsPlaying(true);
     }
-  }, [getSegmentIndexFromOutputTime, getSourceTimeFromOutputTime, isPlaying]);
+  }, [
+    cameraOverlayEnabled,
+    cameraVideoUrl,
+    getSegmentIndexFromOutputTime,
+    getSourceTimeFromOutputTime,
+    isPlaying,
+  ]);
 
   React.useEffect(() => {
     const isEditableTarget = (t: EventTarget | null) => {
@@ -685,6 +740,26 @@ export default function CapcutEditor() {
                       </div>
                     )}
                   </div>
+
+                  {cameraVideoUrl && cameraOverlayEnabled ? (
+                    <div
+                      id="camera-overlay"
+                      className={`absolute right-3 bottom-3 overflow-hidden border border-white/20 shadow-2xl ${
+                        cameraOverlayShape === "circle" ? "rounded-full" : "rounded-2xl"
+                      }`}
+                      style={{
+                        width: `${cameraOverlaySizePct}%`,
+                        aspectRatio: "16 / 9",
+                      }}
+                    >
+                      <video
+                        ref={cameraVideoRef}
+                        className="h-full w-full object-cover"
+                        muted
+                        playsInline
+                      />
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Visual indicators for click-triggered zoom. */}
@@ -736,6 +811,13 @@ export default function CapcutEditor() {
               exportProgress={exportProgress}
               showMenu={showMenu}
               setShowMenu={setShowMenu}
+              cameraOverlayAvailable={Boolean(cameraVideoUrl)}
+              cameraOverlayEnabled={cameraOverlayEnabled}
+              setCameraOverlayEnabled={setCameraOverlayEnabled}
+              cameraOverlayShape={cameraOverlayShape}
+              setCameraOverlayShape={setCameraOverlayShape}
+              cameraOverlaySizePct={cameraOverlaySizePct}
+              setCameraOverlaySizePct={setCameraOverlaySizePct}
             />
           </div>
 
@@ -750,6 +832,7 @@ export default function CapcutEditor() {
               onSplitAt={handleSplitAt}
               onDeleteSegment={handleDeleteSegment}
               onReorderSegment={handleReorderSegment}
+              clickMarkers={clickMarkers}
             />
           </div>
         </div>

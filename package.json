@@ -3,12 +3,17 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "dist-electron/main/index.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:dev": "electron-vite dev",
+    "electron:build": "electron-vite build",
+    "electron:preview": "electron-vite preview",
+    "dist:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
@@ -71,6 +76,10 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react-swc": "^3.5.0",
     "autoprefixer": "^10.4.20",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.8.1",
+    "electron-rebuild": "^3.2.9",
+    "electron-vite": "^3.1.0",
     "eslint": "^9.9.0",
     "eslint-plugin-react-hooks": "^5.1.0-rc.0",
     "eslint-plugin-react-refresh": "^0.4.9",
@@ -80,6 +89,18 @@
     "tailwindcss": "^3.4.11",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.0.1",
+    "uiohook-napi": "^1.5.5",
     "vite": "^5.4.1"
+  },
+  "build": {
+    "appId": "studio.click",
+    "productName": "Click Studio",
+    "files": [
+      "dist/**",
+      "dist-electron/**"
+    ],
+    "mac": {
+      "category": "public.app-category.video"
+    }
   }
 }

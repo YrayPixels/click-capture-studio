@@ -10,6 +10,11 @@ export type CapcutSegment = {
   srcEnd: number; // seconds in source video
 };
 
+export type TimelineClickMarker = {
+  id: string;
+  tOut: number; // seconds on stitched/output timeline
+};
+
 interface CapcutTimelineEditorProps {
   outputDuration: number;
   outputTime: number;
@@ -20,6 +25,7 @@ interface CapcutTimelineEditorProps {
   onSplitAt: (tOut: number) => void;
   onDeleteSegment: (segmentId: string) => void;
   onReorderSegment: (dragSegmentId: string, insertIndex: number) => void;
+  clickMarkers?: TimelineClickMarker[];
 }
 
 function clamp(n: number, a: number, b: number) {
@@ -36,6 +42,7 @@ export function CapcutTimelineEditor({
   onSplitAt,
   onDeleteSegment,
   onReorderSegment,
+  clickMarkers,
 }: CapcutTimelineEditorProps) {
   const trackRef = React.useRef<HTMLDivElement>(null);
   const [dragSegmentId, setDragSegmentId] = React.useState<string | null>(null);
@@ -124,6 +131,24 @@ export function CapcutTimelineEditor({
           setDragSegmentId(null);
         }}
       >
+        {/* Click markers */}
+        {(clickMarkers ?? []).map((m) => {
+          const leftPct = (clamp(m.tOut, 0, safeOutputDuration) / safeOutputDuration) * 100;
+          return (
+            <button
+              key={m.id}
+              type="button"
+              className="absolute top-1 bottom-1 w-[2px] bg-white/80 hover:bg-white rounded-full z-10"
+              style={{ left: `${leftPct}%` }}
+              title={`Click @ ${formatTimeDisplay(m.tOut)}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOutputTimeChange(m.tOut);
+              }}
+            />
+          );
+        })}
+
         {/* Deleted/kept segments are modeled as kept clips only.
             Dragging reorders clips in output time. */}
 
