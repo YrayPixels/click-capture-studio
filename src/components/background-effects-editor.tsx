@@ -15,6 +15,10 @@ interface BackgroundEffectProp {
   selectedBackground: number;
   setPadding: (padding: number) => void;
   padding: number;
+  zoomMode: "off" | "low" | "medium" | "high";
+  setZoomMode: (mode: "off" | "low" | "medium" | "high") => void;
+  zoomDuration: number;
+  setZoomDuration: (duration: number) => void;
   handleExport: (format: string, quality: string, ratio: string) => void;
   isExporting: boolean;
   exportProgress: number;
@@ -31,6 +35,10 @@ export function BackgroundEffectEditor({
   selectedBackground,
   setPadding,
   padding,
+  zoomMode,
+  setZoomMode,
+  zoomDuration,
+  setZoomDuration,
   showMenu,
   setShowMenu
 }: BackgroundEffectProp) {
@@ -92,10 +100,52 @@ export function BackgroundEffectEditor({
             <div className="flex flex-col space-y-2">
               <h3 className="text-sm font-medium">Zoom on Click</h3>
               <div className="flex items-center space-x-4">
-                <Button variant="outline" size="sm" className="flex-1">Off</Button>
-                <Button variant="outline" size="sm" className="flex-1">Low</Button>
-                <Button variant="outline" size="sm" className="flex-1">Medium</Button>
-                <Button variant="outline" size="sm" className="flex-1">High</Button>
+                <Button
+                  variant={zoomMode === "off" ? "default" : "outline"}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => setZoomMode("off")}
+                >
+                  Off
+                </Button>
+                <Button
+                  variant={zoomMode === "low" ? "default" : "outline"}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => setZoomMode("low")}
+                >
+                  Low
+                </Button>
+                <Button
+                  variant={zoomMode === "medium" ? "default" : "outline"}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => setZoomMode("medium")}
+                >
+                  Medium
+                </Button>
+                <Button
+                  variant={zoomMode === "high" ? "default" : "outline"}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => setZoomMode("high")}
+                >
+                  High
+                </Button>
+              </div>
+
+              <div className="flex flex-col space-y-2 pt-2">
+                <div className="flex justify-between text-sm">
+                  <span>Zoom Duration</span>
+                  <span>{zoomDuration.toFixed(1)}s</span>
+                </div>
+                <Slider
+                  value={[zoomDuration]}
+                  min={0.1}
+                  max={2}
+                  step={0.1}
+                  onValueChange={([value]) => setZoomDuration(value)}
+                />
               </div>
             </div>
 

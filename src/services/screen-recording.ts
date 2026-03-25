@@ -39,6 +39,19 @@ export interface MousePosition {
   timestamp: number;
 }
 
+export interface ClickEvent {
+  /**
+   * Seconds since recording start.
+   * Used to map clicks onto the editor timeline.
+   */
+  t: number;
+  /**
+   * Click position normalized to the viewport at the time of capture.
+   */
+  xNorm: number;
+  yNorm: number;
+}
+
 export class ScreenRecordingService {
   private mediaRecorder: MediaRecorder | null = null;
   private cameraStream: MediaStream | null = null;
@@ -46,7 +59,11 @@ export class ScreenRecordingService {
   private recordedBlob: Blob | null = null;
   private currentRecordingPath: string | null = null;
   private mousePositions: MousePosition[] = [];
+  private clickEvents: ClickEvent[] = [];
   private recordingVideoUrl: string | null = null;
+  private recordingStartPerfNow: number | null = null;
+  private viewportAtStart: { w: number; h: number } | null = null;
+  private cleanupRecordingListeners: (() => void) | null = null;
 
   getCurrentRecordingPath() {
     return this.currentRecordingPath;
@@ -54,6 +71,10 @@ export class ScreenRecordingService {
 
   getMousePositions() {
     return this.mousePositions;
+  }
+
+  getClickEvents() {
+    return this.clickEvents;
   }
   
   getRecordingVideoUrl() {
@@ -76,6 +97,30 @@ export class ScreenRecordingService {
     };
   }
 
+  private trackClickEvents = () => {
+    const handlePointerDown = (e: PointerEvent) => {
+      if (this.recordingStartPerfNow == null || !this.viewportAtStart) return;
+
+      const vw = this.viewportAtStart.w || 1;
+      const vh = this.viewportAtStart.h || 1;
+
+      const xNorm = Math.min(1, Math.max(0, e.clientX / vw));
+      const yNorm = Math.min(1, Math.max(0, e.clientY / vh));
+      const t = (performance.now() - this.recordingStartPerfNow) / 1000;
+
+      // Ignore events that happen before the recorder start (shouldn't happen, but safe).
+      if (t < 0) return;
+
+      this.clickEvents.push({ t, xNorm, yNorm });
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  };
+
   async startCameraRecording() {
     try {
       this.cameraStream = await navigator.mediaDevices.getUserMedia({
@@ -95,6 +140,12 @@ export class ScreenRecordingService {
       this.recordedBlob = null;
       this.recordingVideoUrl = null;
       this.mousePositions = [];
+      this.clickEvents = [];
+      this.recordingStartPerfNow = performance.now();
+      this.viewportAtStart = {
+        w: window.innerWidth,
+        h: window.innerHeight,
+      };
 
       let finalStream = stream;
 
@@ -115,15 +166,9 @@ export class ScreenRecordingService {
         }
       };
 
-      const cleanup = this.trackMousePosition();
-      this.mediaRecorder.onstop = () => {
-        cleanup();
-        // Stop camera stream if it exists
-        if (this.cameraStream) {
-          this.cameraStream.getTracks().forEach(track => track.stop());
-          this.cameraStream = null;
-        }
-      };
+      // Store cleanup handler; stopRecording() will run after MediaRecorder.stop()
+      // and owns the final onstop logic.
+      this.cleanupRecordingListeners = this.trackClickEvents();
 
       this.mediaRecorder.start();
     } catch (error) {
@@ -146,6 +191,16 @@ export class ScreenRecordingService {
 
       this.mediaRecorder.onstop = async () => {
         try {
+          // Always cleanup click listeners first.
+          this.cleanupRecordingListeners?.();
+          this.cleanupRecordingListeners = null;
+
+          // Stop camera stream if it exists
+          if (this.cameraStream) {
+            this.cameraStream.getTracks().forEach(track => track.stop());
+            this.cameraStream = null;
+          }
+
           this.recordedBlob = new Blob(this.recordedChunks, { type: 'video/webm' });
           const fileName = this.generateFileName();
           

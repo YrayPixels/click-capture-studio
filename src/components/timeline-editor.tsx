@@ -11,6 +11,7 @@ interface TimelineEditorProps {
   onTimeChange: (time: number) => void;
   onSplitVideo: () => void;
   splitPoints: number[];
+  deletedRanges?: Array<{ start: number; end: number }>;
   isPlaying: boolean;
   onPlayPause: () => void;
   onDeleteSplit?: (index: number) => void;
@@ -22,6 +23,7 @@ export function TimelineEditor({
   onTimeChange,
   onSplitVideo,
   splitPoints,
+  deletedRanges = [],
   isPlaying,
   onPlayPause,
   onDeleteSplit
@@ -118,6 +120,27 @@ export function TimelineEditor({
             <div className="timeline-clip absolute top-0 left-0 bottom-0 right-0 bg-primary/20 border border-primary rounded">
               <div className="px-2 h-full flex items-center text-xs">Main Screen</div>
             </div>
+
+            {/* Deleted ranges (CapCut-like preview skip). */}
+            {deletedRanges.map((r, index) => {
+              const safeDuration = duration || 1;
+              const leftPct = (r.start / safeDuration) * 100;
+              const widthPct = ((r.end - r.start) / safeDuration) * 100;
+              if (widthPct <= 0) return null;
+
+              return (
+                <div
+                  key={`${r.start}-${r.end}-${index}`}
+                  className="absolute top-0 bottom-0 bg-destructive/25 border border-destructive/40 rounded-md"
+                  style={{
+                    left: `${leftPct}%`,
+                    width: `${widthPct}%`,
+                  }}
+                  title={`Deleted: ${formatTimeDisplay(r.start)} - ${formatTimeDisplay(r.end)}`}
+                />
+              );
+            })}
+
             {splitPoints.map((point, index) => (
               <div
                 key={index}

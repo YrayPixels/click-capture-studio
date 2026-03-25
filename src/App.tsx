@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
 import Recording from "./pages/Recording";
-import Editor from "./pages/Editor";
+import CapcutEditor from "./pages/CapcutEditor";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 
@@ -20,7 +20,7 @@ const App = () => (
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/recording" element={<Recording />} />
-          <Route path="/editor/:id" element={<Editor />} />
+          <Route path="/editor/:id" element={<CapcutEditor />} />
           <Route path="/settings" element={<Settings />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

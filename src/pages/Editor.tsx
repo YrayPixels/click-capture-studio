@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { MainNav } from "@/components/main-nav";
 import { TimelineEditor } from "@/components/timeline-editor";
 import { ExportPanel } from "@/components/export-panel";
-import { screenRecordingService } from "@/services/screen-recording";
+import { screenRecordingService, type ClickEvent } from "@/services/screen-recording";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
 import { BackgroundEffectEditor } from "@/components/background-effects-editor";
@@ -21,15 +21,25 @@ export default function Editor() {
   const [showExportPanel, setShowExportPanel] = React.useState(false);
   const [videoUrl, setVideoUrl] = React.useState<string | null>(null);
   const [selectedBackground, setSelectedBackground] = React.useState<number>(0);
-  const [padding, setPadding] = React.useState(20);
+  const [padding, setPadding] = React.useState(100);
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const zoomFrameRef = React.useRef<HTMLDivElement>(null);
   const [showInput, setShowInput] = React.useState(false);
   const [projectTitle, setProjectTitle] = React.useState(id === "new" ? "Untitled Project" : "Project Demo");
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [splitPoints, setSplitPoints] = React.useState<number[]>([]);
+  const [deletedRanges, setDeletedRanges] = React.useState<
+    Array<{ start: number; end: number }>
+  >([]);
+  const deletedRangesRef = React.useRef(deletedRanges);
+  const isSeekingRef = React.useRef(false);
   const videoContainerRef = React.useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = React.useState(0);
   const [showMenu, setShowMenu] = React.useState(true);
+  const [clickEvents, setClickEvents] = React.useState<ClickEvent[]>([]);
+  const [zoomMode, setZoomMode] = React.useState<"off" | "low" | "medium" | "high">("medium");
+  // Default per spec: 0.5s, but user can edit.
+  const [zoomDuration, setZoomDuration] = React.useState<number>(0.5);
 
   React.useEffect(() => {
     if (id === "new") {
@@ -37,6 +47,7 @@ export default function Editor() {
       console.log("Recording video URL:", recordingVideoUrl);
       if (recordingVideoUrl) {
         setVideoUrl(recordingVideoUrl);
+        setClickEvents(screenRecordingService.getClickEvents());
       } else {
         toast.error("No recording found. Please record a video first.");
       }
@@ -44,6 +55,10 @@ export default function Editor() {
       setVideoUrl(`/videos/${id}`);
     }
   }, [id]);
+
+  React.useEffect(() => {
+    deletedRangesRef.current = deletedRanges;
+  }, [deletedRanges]);
 
   React.useEffect(() => {
     const handleLoadedMetadata = () => {
@@ -98,7 +113,11 @@ export default function Editor() {
   };
 
   const handleSplitVideo = () => {
-    if (videoRef.current && currentTime > 0) {
+    if (!videoRef.current) return;
+    if (videoDuration <= 0) return;
+    // Allow split at 0, but don't allow a split at (or extremely near) the end.
+    if (currentTime < 0 || currentTime >= videoDuration - 0.02) return;
+
       setSplitPoints((prev) => {
         const existingPoint = prev.find(point => Math.abs(point - currentTime) < 0.1);
         if (!existingPoint) {
@@ -107,21 +126,72 @@ export default function Editor() {
         return prev;
       });
       toast.success(`Split added at ${formatTimeDisplay(currentTime)}`);
+  };
+
+  const mergeRanges = (ranges: Array<{ start: number; end: number }>) => {
+    const EPS = 0.03;
+    const sorted = [...ranges].sort((a, b) => a.start - b.start);
+    const merged: Array<{ start: number; end: number }> = [];
+
+    for (const r of sorted) {
+      const start = Math.max(0, Math.min(videoDuration, r.start));
+      const end = Math.max(0, Math.min(videoDuration, r.end));
+      if (end - start <= 0.01) continue;
+
+      const last = merged[merged.length - 1];
+      if (!last) {
+        merged.push({ start, end });
+        continue;
+      }
+
+      if (r.start <= last.end + EPS) {
+        last.end = Math.max(last.end, end);
+      } else {
+        merged.push({ start, end });
+      }
+    }
+
+    return merged;
+  };
+
+  const adjustTimeForDeletedRanges = (t: number) => {
+    const EPS = 0.005;
+    const ranges = deletedRangesRef.current;
+    let time = Math.max(0, Math.min(videoDuration, t));
+
+    // If the playhead lands inside a deleted range, jump to its end.
+    while (true) {
+      const r = ranges.find((x) => time >= x.start - EPS && time < x.end - EPS);
+      if (!r) return time;
+      time = Math.min(videoDuration, r.end + EPS);
+      if (time >= videoDuration - EPS) return videoDuration;
     }
   };
 
   const handleDeleteSplit = (index: number) => {
-    setSplitPoints(prev => prev.filter((_, i) => i !== index));
-    toast.success("Split point removed");
+    if (videoDuration <= 0) return;
+    const start = splitPoints[index];
+    if (start == null) return;
+
+    const end =
+      index < splitPoints.length - 1 ? splitPoints[index + 1] : videoDuration;
+
+    if (end - start <= 0.02) return;
+
+    setDeletedRanges((prev) => mergeRanges([...prev, { start, end }]));
+    toast.success(
+      `Deleted segment ${formatTimeDisplay(start)} - ${formatTimeDisplay(end)}`
+    );
   };
 
   const handleTimeChange = (time: number) => {
     if (isNaN(time) || !isFinite(time)) {
       time = 0;
     }
-    setCurrentTime(time);
+    const adjusted = adjustTimeForDeletedRanges(time);
+    setCurrentTime(adjusted);
     if (videoRef.current) {
-      videoRef.current.currentTime = time;
+      videoRef.current.currentTime = adjusted;
     }
   };
 
@@ -141,7 +211,21 @@ export default function Editor() {
       if (videoRef.current) {
         videoRef.current.ontimeupdate = () => {
           if (videoRef.current) {
-            setCurrentTime(videoRef.current.currentTime);
+            const t = videoRef.current.currentTime;
+            const adjusted = adjustTimeForDeletedRanges(t);
+
+            // Avoid recursive seeks triggering a storm.
+            if (Math.abs(adjusted - t) > 0.01 && !isSeekingRef.current) {
+              isSeekingRef.current = true;
+              videoRef.current.currentTime = adjusted;
+              setCurrentTime(adjusted);
+              requestAnimationFrame(() => {
+                isSeekingRef.current = false;
+              });
+              return;
+            }
+
+            setCurrentTime(adjusted);
           }
         };
 
@@ -160,6 +244,82 @@ export default function Editor() {
       }
     };
   }, [videoRef.current]);
+
+  // If the user deletes a section that currently contains the playhead,
+  // immediately jump to the next kept time.
+  React.useEffect(() => {
+    if (!videoRef.current) return;
+    const t = videoRef.current.currentTime;
+    const adjusted = adjustTimeForDeletedRanges(t);
+    if (Math.abs(adjusted - t) > 0.01) {
+      isSeekingRef.current = true;
+      videoRef.current.currentTime = adjusted;
+      setCurrentTime(adjusted);
+      requestAnimationFrame(() => {
+        isSeekingRef.current = false;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deletedRanges]);
+
+  const computeZoomTransform = () => {
+    const baseScale = padding / 100;
+
+    // Default: just base scale (driven by the existing "Scale" slider).
+    let totalScale = baseScale;
+    let translateX = 0;
+    let translateY = 0;
+
+    if (zoomMode === "off" || !clickEvents.length || zoomDuration <= 0) {
+      return { totalScale, translateX, translateY };
+    }
+
+    const maxScaleByMode: Record<"low" | "medium" | "high", number> = {
+      low: 1.25,
+      medium: 1.5,
+      high: 2.0,
+    };
+
+    // Find the most recent click that is active for the configured zoom window.
+    const activeClick = [...clickEvents]
+      .reverse()
+      .find((e) => currentTime >= e.t && currentTime <= e.t + zoomDuration);
+
+    if (!activeClick) {
+      return { totalScale, translateX, translateY };
+    }
+
+    const progress = Math.min(
+      1,
+      Math.max(0, (currentTime - activeClick.t) / zoomDuration)
+    );
+
+    // Ease for nicer camera motion (easeInOutCubic).
+    const eased =
+      progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+
+    const zoomMultiplier =
+      1 +
+      (maxScaleByMode[zoomMode] - 1) * eased;
+
+    totalScale = baseScale * zoomMultiplier;
+
+    const rect = zoomFrameRef.current?.getBoundingClientRect();
+    const w = rect?.width ?? 0;
+    const h = rect?.height ?? 0;
+
+    if (w > 0 && h > 0) {
+      // Keep the clicked point at the center of the video frame while zooming.
+      translateX = (0.5 - totalScale * activeClick.xNorm) * w;
+      translateY = (0.5 - totalScale * activeClick.yNorm) * h;
+    }
+
+    return { totalScale, translateX, translateY };
+  };
+
+  const { totalScale, translateX, translateY } = computeZoomTransform();
 
   let timeOut: NodeJS.Timeout;
 
@@ -229,10 +389,12 @@ export default function Editor() {
                 className={`h-full w-full flex flex-row justify-center items-center shadow-xl ${backgrounds[selectedBackground]} backdrop-blur-sm`}
               >
                 <div
-                  className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black transition-all duration-300`}
+                  ref={zoomFrameRef}
+                  className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black transition-transform duration-150 ease-out will-change-transform`}
                   style={{
                     width: `${videoRef.current?.videoWidth > 500 ? '90%' : '300px'}`,
-                    scale: `${padding / 100}`,
+                    transformOrigin: "0 0",
+                    transform: `translate(${translateX}px, ${translateY}px) scale(${totalScale})`,
                   }}
                 >
                   <div className="pb-2  bg-gray-800">
@@ -270,6 +432,10 @@ export default function Editor() {
               setSelectedBackground={setSelectedBackground}
               padding={padding}
               setPadding={setPadding}
+              zoomMode={zoomMode}
+              setZoomMode={setZoomMode}
+              zoomDuration={zoomDuration}
+              setZoomDuration={setZoomDuration}
               handleExport={handleExport}
               isExporting={isExporting}
               exportProgress={exportProgress}
@@ -285,6 +451,7 @@ export default function Editor() {
               onTimeChange={handleTimeChange}
               onSplitVideo={handleSplitVideo}
               splitPoints={splitPoints}
+              deletedRanges={deletedRanges}
               isPlaying={isPlaying}
               onPlayPause={togglePlayPause}
               onDeleteSplit={handleDeleteSplit}
