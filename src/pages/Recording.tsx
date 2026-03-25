@@ -104,6 +104,7 @@ export default function Recording() {
   const unsubscribeClicksRef = React.useRef<null | (() => void)>(null);
   const cameraVideoRef = React.useRef<HTMLVideoElement>(null);
   const previewVideoRef = React.useRef<HTMLVideoElement>(null);
+  const startedRef = React.useRef(false);
 
   React.useEffect(() => {
     if (cameraStream && cameraVideoRef.current) {
@@ -151,6 +152,8 @@ export default function Recording() {
 
   const handleCountdownComplete = async () => {
     try {
+      if (startedRef.current) return;
+      startedRef.current = true;
       let displayStream: MediaStream | null = null;
       let camStream: MediaStream | null = null;
       let microphoneStream: MediaStream | null = null;
@@ -270,6 +273,7 @@ export default function Recording() {
       setIsCountingDown(false);
       startTimer();
     } catch (error) {
+      startedRef.current = false;
       const err = error as { name?: string; message?: string };
       console.error("Error starting recording:", error);
       toast.error(
@@ -280,6 +284,14 @@ export default function Recording() {
       navigate('/');
     }
   };
+
+  // If countdown is off, start recording immediately on mount.
+  React.useEffect(() => {
+    if (prefs.countdownSeconds > 0) return;
+    if (startedRef.current) return;
+    void handleCountdownComplete();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs.countdownSeconds]);
 
   const handlePauseToggle = () => {
     setIsPaused((prev) => !prev);
@@ -292,6 +304,10 @@ export default function Recording() {
   };
 
   const handleStop = async () => {
+    if (!stream || !startedRef.current) {
+      toast.error("Recording hasn't started yet.");
+      return;
+    }
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
