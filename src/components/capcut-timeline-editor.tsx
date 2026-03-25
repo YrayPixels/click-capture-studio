@@ -1,6 +1,5 @@
 import * as React from "react";
 import { Scissors, Play, Pause, Trash } from "lucide-react";
-import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { formatTimeDisplay } from "@/utils/videoExport";
 
@@ -132,6 +131,18 @@ export function CapcutTimelineEditor({
   const contentWidth = Math.max(1, safeOutputDuration * safePxPerSecond);
   const rulerStepSec = pickRulerStepSec(safePxPerSecond);
 
+  const seekFromClientX = React.useCallback(
+    (clientX: number) => {
+      const scrollEl = scrollRef.current;
+      if (!scrollEl) return;
+      const rect = scrollEl.getBoundingClientRect();
+      const x = clamp(clientX - rect.left, 0, rect.width);
+      const t = clamp((scrollEl.scrollLeft + x) / safePxPerSecond, 0, safeOutputDuration);
+      onOutputTimeChange(t);
+    },
+    [onOutputTimeChange, safeOutputDuration, safePxPerSecond]
+  );
+
   // Keep DOM scroll in sync with time-based scroll.
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -159,10 +170,10 @@ export function CapcutTimelineEditor({
   const audioRows = audioTracks ?? [];
 
   return (
-    <div className="bg-card rounded-lg border shadow-sm p-4 w-full">
+    <div className="rounded-lg border border-white/10 bg-card/80 shadow-sm p-4 w-full">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-2">
-          <span className="font-mono text-sm">{formatTimeDisplay(outputTime)}</span>
+          <span className="font-mono text-sm text-white/90">{formatTimeDisplay(outputTime)}</span>
         </div>
 
         <div className="flex items-center space-x-2">
@@ -188,25 +199,16 @@ export function CapcutTimelineEditor({
         </div>
       </div>
 
-      <div className="py-2">
-        <Slider
-          value={[outputTime || 0]}
-          max={outputDuration || 0}
-          step={0.01}
-          onValueChange={([value]) => onOutputTimeChange(value)}
-        />
-        <div className="flex justify-between text-xs text-muted-foreground mt-2">
-          <span>{formatTimeDisplay(outputTime)}</span>
-          <span>{formatTimeDisplay(outputDuration)}</span>
-        </div>
-      </div>
-
-      <div className="mt-4 grid grid-cols-[160px_1fr] gap-2">
+      <div className="mt-4 grid grid-cols-[180px_1fr] gap-2">
         {/* Track headers */}
         <div className="space-y-2">
           <div className="h-7" />
-          <div className="h-12 rounded-md border border-white/10 bg-white/5 px-2 flex items-center">
-            <div className="text-xs font-medium text-white/80">Video</div>
+          <div className="h-12 rounded-md border border-white/10 bg-white/5 px-2 flex items-center justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="h-2 w-2 rounded-full bg-emerald-400/80 shadow-[0_0_0_3px_rgba(16,185,129,0.12)]" />
+              <div className="text-xs font-medium truncate text-white/85">Video</div>
+            </div>
+            <div className="text-[10px] text-white/50 font-mono">Track 1</div>
           </div>
           {audioRows.map((t) => {
             return (
@@ -215,12 +217,15 @@ export function CapcutTimelineEditor({
                 className="h-10 rounded-md border border-white/10 bg-white/5 px-2 flex items-center gap-2"
               >
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-medium truncate text-white/80">{t.name}</div>
+                  <div className="text-xs font-medium truncate text-white/85">{t.name}</div>
+                  <div className="text-[10px] text-white/45 font-mono truncate">
+                    Vol {Math.round(t.volume * 100)}%
+                  </div>
                 </div>
                 <Button
                   variant={t.muted ? "default" : "outline"}
                   size="sm"
-                  className="h-7 px-2"
+                  className="h-7 px-2 rounded-sm"
                   onClick={() => onUpdateAudioTrack?.(t.id, { muted: !t.muted })}
                 >
                   M
@@ -228,7 +233,7 @@ export function CapcutTimelineEditor({
                 <Button
                   variant={t.solo ? "default" : "outline"}
                   size="sm"
-                  className="h-7 px-2"
+                  className="h-7 px-2 rounded-sm"
                   onClick={() => onUpdateAudioTrack?.(t.id, { solo: !t.solo })}
                 >
                   S
@@ -241,7 +246,7 @@ export function CapcutTimelineEditor({
         {/* Scrollable timeline surface */}
         <div
           ref={scrollRef}
-          className="overflow-x-auto overflow-y-hidden rounded-md border border-white/10 bg-secondary/40"
+          className="overflow-x-auto overflow-y-hidden rounded-md border border-white/10 bg-gradient-to-b from-white/[0.06] to-white/[0.03]"
           onScroll={(e) => {
             const el = e.currentTarget;
             onScrollSecChange(clamp(el.scrollLeft / safePxPerSecond, 0, safeOutputDuration));
@@ -278,7 +283,12 @@ export function CapcutTimelineEditor({
         >
           <div style={{ width: `${contentWidth}px` }}>
             {/* Time ruler */}
-            <div className="relative h-7 border-b border-white/10 select-none">
+            <div
+              className="relative h-7 border-b border-white/10 select-none bg-white/[0.02] cursor-pointer"
+              onPointerDown={(e) => {
+                seekFromClientX(e.clientX);
+              }}
+            >
               {(() => {
                 const ticks: React.ReactNode[] = [];
                 const count = Math.ceil(safeOutputDuration / rulerStepSec);
@@ -291,8 +301,8 @@ export function CapcutTimelineEditor({
                       className="absolute top-0 bottom-0"
                       style={{ left: `${x}px` }}
                     >
-                      <div className="absolute top-0 h-3 w-px bg-white/35" />
-                      <div className="absolute top-3 -translate-x-1/2 text-[10px] text-white/70 font-mono whitespace-nowrap">
+                      <div className="absolute top-0 h-3 w-px bg-white/30" />
+                      <div className="absolute top-3 -translate-x-1/2 text-[10px] text-white/65 font-mono whitespace-nowrap">
                         {formatTimeDisplay(t)}
                       </div>
                     </div>
@@ -305,9 +315,13 @@ export function CapcutTimelineEditor({
             {/* Video lane */}
             <div
               ref={trackRef}
-              className="timeline-track relative h-12 rounded-md"
+              className="timeline-track relative h-12 cursor-pointer"
               onDragOver={(e) => {
                 e.preventDefault();
+              }}
+              onPointerDown={(e) => {
+                // Clicking empty timeline seeks; markers/clips stopPropagation.
+                seekFromClientX(e.clientX);
               }}
               onDrop={(e) => {
                 e.preventDefault();
@@ -318,6 +332,16 @@ export function CapcutTimelineEditor({
                 setDragSegmentId(null);
               }}
             >
+              {/* Subtle vertical grid */}
+              <div
+                className="absolute inset-0 pointer-events-none opacity-60"
+                style={{
+                  backgroundImage:
+                    "linear-gradient(to right, rgba(255,255,255,0.06) 0, rgba(255,255,255,0.06) 1px, transparent 1px, transparent 48px)",
+                  backgroundSize: "48px 100%",
+                }}
+              />
+
               {/* Click markers */}
               {(clickMarkers ?? []).map((m) => {
                 const leftPx = clamp(m.tOut, 0, safeOutputDuration) * safePxPerSecond;
@@ -326,8 +350,8 @@ export function CapcutTimelineEditor({
                   <button
                     key={m.id}
                     type="button"
-                    className={`absolute top-1 bottom-1 w-[3px] rounded-full z-10 ${
-                      isSelected ? "bg-white" : "bg-white/70 hover:bg-white/90"
+                    className={`absolute top-1 bottom-1 w-[3px] rounded-full z-20 transition-colors ${
+                      isSelected ? "bg-white shadow-[0_0_0_3px_rgba(255,255,255,0.14)]" : "bg-white/60 hover:bg-white/90"
                     }`}
                     style={{ left: `${leftPx}px` }}
                     title={`Click @ ${formatTimeDisplay(m.tOut)}`}
@@ -383,7 +407,7 @@ export function CapcutTimelineEditor({
                       setDragSegmentId(seg.id);
                     }}
                     onDragEnd={() => setDragSegmentId(null)}
-                    className="absolute top-0 bottom-0 border border-primary/40 bg-primary/20 rounded-md cursor-grab"
+                    className="absolute top-1 bottom-1 rounded-md cursor-grab border border-emerald-400/35 bg-emerald-500/10 shadow-[inset_0_0_0_1px_rgba(0,0,0,0.2)]"
                     style={{
                       left: `${leftPx}px`,
                       width: `${widthPx}px`,
@@ -394,9 +418,18 @@ export function CapcutTimelineEditor({
                       onOutputTimeChange(outStart);
                     }}
                   >
+                    {/* Fake thumbnail strip to mimic CapCut density */}
+                    <div
+                      className="absolute inset-0 opacity-70"
+                      style={{
+                        backgroundImage:
+                          "linear-gradient(to right, rgba(255,255,255,0.10) 0, rgba(255,255,255,0.10) 1px, transparent 1px, transparent 10px)",
+                        backgroundSize: "10px 100%",
+                      }}
+                    />
                     {/* Trim handles */}
                     <div
-                      className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize bg-white/0 hover:bg-white/10"
+                      className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize bg-white/0 hover:bg-white/15"
                       title="Trim start"
                       onPointerDown={(e) => {
                         e.stopPropagation();
@@ -429,7 +462,7 @@ export function CapcutTimelineEditor({
                       }}
                     />
                     <div
-                      className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize bg-white/0 hover:bg-white/10"
+                      className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize bg-white/0 hover:bg-white/15"
                       title="Trim end"
                       onPointerDown={(e) => {
                         e.stopPropagation();
@@ -484,7 +517,7 @@ export function CapcutTimelineEditor({
                     />
 
                     <div className="absolute left-0 top-0 h-full w-full flex items-center">
-                      <div className="px-2 text-xs truncate">
+                      <div className="px-2 text-[11px] text-white/85 font-mono truncate">
                         {formatTimeDisplay(seg.srcStart)} - {formatTimeDisplay(seg.srcEnd)}
                       </div>
 
@@ -498,9 +531,9 @@ export function CapcutTimelineEditor({
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-7 w-7 bg-destructive/10 hover:bg-destructive/20"
+                          className="h-7 w-7 bg-white/5 hover:bg-white/10"
                         >
-                          <Trash className="h-4 w-4 text-destructive" />
+                          <Trash className="h-4 w-4 text-white/70" />
                         </Button>
                       </div>
                     </div>
@@ -510,10 +543,11 @@ export function CapcutTimelineEditor({
 
               {/* Playhead */}
               <div
-                className="absolute top-0 bottom-0 w-0.5 bg-white z-20"
+                className="absolute top-0 bottom-0 w-0.5 bg-white z-30"
                 style={{ left: `${clamp(outputTime, 0, safeOutputDuration) * safePxPerSecond}px` }}
               >
-                <div className="absolute top-[-10px] left-[-10px] bg-white w-5 h-5 rounded-full shadow-md" />
+                <div className="absolute top-[-12px] left-[-10px] bg-white w-5 h-5 rounded-full shadow-md" />
+                <div className="absolute top-[-2px] left-[-6px] w-3 h-3 rotate-45 bg-white shadow-sm" />
               </div>
             </div>
 
@@ -521,7 +555,13 @@ export function CapcutTimelineEditor({
             {audioRows.map((t) => {
               const isAudible = t.solo || !audioRows.some((x) => x.solo) ? !t.muted : false;
               return (
-                <div key={t.id} className="relative h-10 border-t border-white/10">
+                <div
+                  key={t.id}
+                  className="relative h-10 border-t border-white/10 bg-white/[0.01] cursor-pointer"
+                  onPointerDown={(e) => {
+                    seekFromClientX(e.clientX);
+                  }}
+                >
                   {t.clips.map((c) => {
                     const leftPx = clamp(c.tOutStart, 0, safeOutputDuration) * safePxPerSecond;
                     const widthPx = clamp(c.duration, 0, safeOutputDuration) * safePxPerSecond;
@@ -530,17 +570,17 @@ export function CapcutTimelineEditor({
                       <div
                         key={c.id}
                         className={`absolute top-1 bottom-1 rounded-md border ${
-                          isAudible ? "border-emerald-400/40 bg-emerald-500/15" : "border-white/15 bg-white/5"
+                          isAudible ? "border-sky-400/35 bg-sky-500/10" : "border-white/15 bg-white/5"
                         } overflow-hidden`}
                         style={{ left: `${leftPx}px`, width: `${widthPx}px` }}
                         title={`${t.name} (${Math.round(t.volume * 100)}%)`}
                       >
                         <div
-                          className="absolute inset-0 opacity-70"
+                          className="absolute inset-0 opacity-60"
                           style={{
                             backgroundImage:
-                              "linear-gradient(to right, rgba(255,255,255,0.10) 0, rgba(255,255,255,0.10) 1px, transparent 1px, transparent 6px)",
-                            backgroundSize: "6px 100%",
+                              "linear-gradient(to right, rgba(255,255,255,0.10) 0, rgba(255,255,255,0.10) 1px, transparent 1px, transparent 8px)",
+                            backgroundSize: "8px 100%",
                           }}
                         />
                         <div className="relative h-full px-2 flex items-center text-[10px] text-white/70 font-mono truncate">

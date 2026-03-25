@@ -372,7 +372,7 @@ export default function Recording() {
             data: {
               videoPath,
               videoUrl: screenRecordingService.getRecordingVideoUrl(),
-              cameraVideoPath: null,
+              cameraVideoPath: screenRecordingService.getRecordingCameraPath(),
               cameraVideoUrl: screenRecordingService.getRecordingCameraVideoUrl(),
               clickEventsSource: screenRecordingService.getClickEvents(),
               segments: [],

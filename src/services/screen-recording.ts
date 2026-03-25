@@ -52,6 +52,14 @@ export interface ClickEvent {
   yNorm: number;
 }
 
+export type RecordingState =
+  | "idle"
+  | "preparing"
+  | "recording"
+  | "stopping"
+  | "completed"
+  | "error";
+
 export class ScreenRecordingService {
   private mediaRecorder: MediaRecorder | null = null;
   private cameraRecorder: MediaRecorder | null = null;
@@ -61,6 +69,7 @@ export class ScreenRecordingService {
   private recordedCameraChunks: Blob[] = [];
   private recordedCameraBlob: Blob | null = null;
   private currentRecordingPath: string | null = null;
+  private recordingCameraPath: string | null = null;
   private mousePositions: MousePosition[] = [];
   private clickEvents: ClickEvent[] = [];
   private recordingVideoUrl: string | null = null;
@@ -70,6 +79,27 @@ export class ScreenRecordingService {
   private cleanupRecordingListeners: (() => void) | null = null;
   private usingGlobalClickCapture = false;
   private recordedMimeType: string | null = null;
+  private state: RecordingState = "idle";
+  private stateListeners = new Set<(state: RecordingState) => void>();
+
+  private setState(state: RecordingState) {
+    this.state = state;
+    for (const listener of this.stateListeners) {
+      listener(state);
+    }
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  subscribeState(listener: (state: RecordingState) => void) {
+    this.stateListeners.add(listener);
+    listener(this.state);
+    return () => {
+      this.stateListeners.delete(listener);
+    };
+  }
 
   private describeError(e: unknown) {
     const anyE = e as { name?: string; message?: string; stack?: string; code?: unknown };
@@ -133,6 +163,10 @@ export class ScreenRecordingService {
 
   getRecordingCameraVideoUrl() {
     return this.recordingCameraVideoUrl;
+  }
+
+  getRecordingCameraPath() {
+    return this.recordingCameraPath;
   }
 
   private trackMousePosition = () => {
@@ -205,6 +239,7 @@ export class ScreenRecordingService {
 
   async startRecording(stream: MediaStream, options?: RecordingOptions) {
     try {
+      this.setState("preparing");
       if (typeof window === "undefined" || typeof document === "undefined") {
         throw new Error("Recording can only start in a browser environment.");
       }
@@ -218,6 +253,7 @@ export class ScreenRecordingService {
       this.recordedCameraChunks = [];
       this.recordedCameraBlob = null;
       this.recordingCameraVideoUrl = null;
+      this.recordingCameraPath = null;
       this.mousePositions = [];
       this.clickEvents = [];
       this.recordingStartPerfNow = performance.now();
@@ -298,15 +334,18 @@ export class ScreenRecordingService {
 
       try {
         this.mediaRecorder.start();
+        this.setState("recording");
       } catch (e) {
         console.error("[recording] MediaRecorder.start() failed", {
           error: this.describeError(e),
           state: this.mediaRecorder.state,
         });
+        this.setState("error");
         throw e;
       }
     } catch (error) {
       console.error("[recording] Error starting recording (service)", this.describeError(error));
+      this.setState("error");
       throw error;
     }
   }
@@ -320,6 +359,7 @@ export class ScreenRecordingService {
     this.recordedCameraChunks = [];
     this.recordedCameraBlob = null;
     this.recordingCameraVideoUrl = null;
+    this.recordingCameraPath = null;
 
     const mimeType = this.pickSupportedMimeType();
     const recorderOptions: MediaRecorderOptions = {
@@ -364,9 +404,11 @@ export class ScreenRecordingService {
   stopRecording(): Promise<string> {
     return new Promise((resolve, reject) => {
       if (!this.mediaRecorder) {
+        this.setState("error");
         reject(new Error('No recording in progress'));
         return;
       }
+      this.setState("stopping");
 
       const stopCameraSidecar = () => {
         return new Promise<void>((res) => {
@@ -376,7 +418,7 @@ export class ScreenRecordingService {
           }
 
           const recorder = this.cameraRecorder;
-          recorder.onstop = () => {
+          recorder.onstop = async () => {
             try {
               if (this.recordedCameraChunks.length) {
                 this.recordedCameraBlob = new Blob(this.recordedCameraChunks, {
@@ -385,6 +427,19 @@ export class ScreenRecordingService {
                 this.recordingCameraVideoUrl = URL.createObjectURL(
                   this.recordedCameraBlob
                 );
+                if (window.clickStudio?.saveRecording) {
+                  const cameraName = `camera-${this.generateFileName()}`;
+                  try {
+                    const cameraBuf = new Uint8Array(await this.recordedCameraBlob.arrayBuffer());
+                    const cameraRes = await window.clickStudio.saveRecording(cameraName, cameraBuf);
+                    if (cameraRes.ok) {
+                      this.recordingCameraPath = cameraRes.path;
+                      this.recordingCameraVideoUrl = `file://${encodeURI(cameraRes.path)}`;
+                    }
+                  } catch (e) {
+                    console.warn("[recording] camera sidecar save failed", e);
+                  }
+                }
               }
             } catch (e) {
               console.warn("[recording] camera sidecar finalize failed", e);
@@ -444,14 +499,15 @@ export class ScreenRecordingService {
               const res = await window.clickStudio.saveRecording(fileName, buf);
               if (res.ok) {
                 this.currentRecordingPath = res.path;
+                this.setState("completed");
                 resolve(res.path);
               } else {
-                // Electron autosave should not silently fail.
-                const msg = res.error?.message || "Failed to save recording";
+                const msg = "error" in res ? res.error?.message || "Failed to save recording" : "Failed to save recording";
                 throw new Error(msg);
               }
             } catch (e) {
               console.error("[recording] Electron saveRecording failed", e);
+              this.setState("error");
               reject(e);
             }
           } else if (window.showSaveFilePicker) {
@@ -471,21 +527,25 @@ export class ScreenRecordingService {
               
               // Store the file path
               this.currentRecordingPath = fileName;
+              this.setState("completed");
               resolve(fileName);
             } catch (error) {
               console.error('Error using File System Access API:', error);
               // Fall back to downloading if the user cancels or an error occurs
               this.downloadFile(this.recordedBlob, fileName);
               this.currentRecordingPath = fileName;
+              this.setState("completed");
               resolve(fileName);
             }
           } else {
             // Fallback to downloading if File System Access API is not supported
             this.downloadFile(this.recordedBlob, fileName);
             this.currentRecordingPath = fileName;
+            this.setState("completed");
             resolve(fileName);
           }
         } catch (error) {
+          this.setState("error");
           reject(error);
         }
       };

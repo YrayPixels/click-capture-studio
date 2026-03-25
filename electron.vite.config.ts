@@ -9,7 +9,7 @@ export default defineConfig({
         entry: path.join(__dirname, "electron/main.ts"),
       },
       rollupOptions: {
-        external: ["uiohook-napi"],
+        external: ["uiohook-napi", "ffmpeg-static"],
         output: {
           entryFileNames: "index.js",
         },

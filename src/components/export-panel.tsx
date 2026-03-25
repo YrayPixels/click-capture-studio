@@ -14,14 +14,18 @@ import { Progress } from "@/components/ui/progress";
 
 interface ExportPanelProps {
   onExport: (format: string, quality: string, ratio: string) => void;
+  onCancelExport?: () => void;
   isExporting: boolean;
   progress: number;
+  statusText?: string;
 }
 
 export function ExportPanel({ 
   onExport, 
+  onCancelExport,
   isExporting, 
-  progress 
+  progress,
+  statusText,
 }: ExportPanelProps) {
   const [format, setFormat] = React.useState("mp4");
   const [quality, setQuality] = React.useState("1080p");
@@ -88,13 +92,22 @@ export function ExportPanel({
           {isExporting ? (
             <div className="space-y-2 pt-4">
               <div className="flex justify-between text-sm mb-1">
-                <span>Exporting video...</span>
+                <span>{statusText ?? "Exporting video..."}</span>
                 <span>{progress}%</span>
               </div>
               <Progress value={progress} className="h-2" />
               <p className="text-xs text-muted-foreground mt-2">
                 This may take a few minutes depending on the length and quality of your video.
               </p>
+              {onCancelExport ? (
+                <Button
+                  variant="outline"
+                  className="w-full mt-2"
+                  onClick={onCancelExport}
+                >
+                  Cancel Export
+                </Button>
+              ) : null}
             </div>
           ) : (
             <Button 
@@ -155,13 +168,22 @@ export function ExportPanel({
           {isExporting ? (
             <div className="space-y-2 pt-4">
               <div className="flex justify-between text-sm mb-1">
-                <span>Exporting video...</span>
+                <span>{statusText ?? "Exporting video..."}</span>
                 <span>{progress}%</span>
               </div>
               <Progress value={progress} className="h-2" />
               <p className="text-xs text-muted-foreground mt-2">
                 This may take a few minutes depending on the length and quality of your video.
               </p>
+              {onCancelExport ? (
+                <Button
+                  variant="outline"
+                  className="w-full mt-2"
+                  onClick={onCancelExport}
+                >
+                  Cancel Export
+                </Button>
+              ) : null}
             </div>
           ) : (
             <Button 

@@ -13,7 +13,16 @@ import {
 import { toast } from "sonner";
 import { screenRecordingService, type ClickEvent } from "@/services/screen-recording";
 import { backgrounds } from "@/services/color";
-import { exportVideo, formatTimeDisplay } from "@/utils/videoExport";
+import { formatTimeDisplay } from "@/utils/videoExport";
+import { createExportTask } from "@/services/export-task";
+import {
+  clamp,
+  deleteSegmentById,
+  reorderSegment,
+  sourceTimeFromOutputTime,
+  splitSegmentAtOutputTime,
+  trimSegment,
+} from "@/features/editor/timeline-state";
 
 type ZoomMode = "off" | "low" | "medium" | "high";
 
@@ -46,10 +55,6 @@ function makeId() {
   return `seg_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function clamp(n: number, a: number, b: number) {
-  return Math.min(b, Math.max(a, n));
-}
-
 type ClickEventStitched = {
   id: string;
   // Time on the stitched/exported timeline
@@ -71,6 +76,8 @@ export default function CapcutEditor() {
   const [videoLoadError, setVideoLoadError] = React.useState<string | null>(null);
   const [cameraVideoUrl, setCameraVideoUrl] = React.useState<string | null>(null);
   const [videoDuration, setVideoDuration] = React.useState(0); // source duration (seconds)
+  const [previewAspectRatio, setPreviewAspectRatio] = React.useState<number>(3 / 2);
+  const [isPortraitVideo, setIsPortraitVideo] = React.useState(false);
 
   const [outputTime, setOutputTime] = React.useState(0); // stitched timeline time (seconds)
   const outputTimeRef = React.useRef(outputTime);
@@ -126,6 +133,10 @@ export default function CapcutEditor() {
 
   const [isExporting, setIsExporting] = React.useState(false);
   const [exportProgress, setExportProgress] = React.useState(0);
+  const [exportStatusText, setExportStatusText] = React.useState("Exporting video...");
+  const exportTaskRef = React.useRef<ReturnType<typeof createExportTask> | null>(null);
+  const nativeExportJobIdRef = React.useRef<string | null>(null);
+  const nativeExportUnsubRef = React.useRef<null | (() => void)>(null);
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const cameraVideoRef = React.useRef<HTMLVideoElement>(null);
@@ -137,6 +148,8 @@ export default function CapcutEditor() {
   const [projectTitle, setProjectTitle] = React.useState(
     id === "new" ? "Untitled Project" : "Project Demo"
   );
+  const [isEditingTitle, setIsEditingTitle] = React.useState(false);
+  const titleInputRef = React.useRef<HTMLInputElement>(null);
   const draftId = React.useMemo(() => {
     if (!id) return null;
     if (!id.startsWith("draft_")) return null;
@@ -159,6 +172,13 @@ export default function CapcutEditor() {
       if (outputTimeRafRef.current != null) {
         cancelAnimationFrame(outputTimeRafRef.current);
       }
+      const jobId = nativeExportJobIdRef.current;
+      if (jobId && window.clickStudio?.cancelNativeExport) {
+        void window.clickStudio.cancelNativeExport(jobId);
+      }
+      nativeExportUnsubRef.current?.();
+      nativeExportUnsubRef.current = null;
+      exportTaskRef.current?.cancel();
     };
   }, []);
 
@@ -235,6 +255,15 @@ export default function CapcutEditor() {
     }
   }, [id, draftId]);
 
+  React.useEffect(() => {
+    if (!isEditingTitle) return;
+    const t = window.setTimeout(() => {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [isEditingTitle]);
+
   const handleLocateVideo = React.useCallback(async () => {
     if (!draftId) return;
     if (!window.clickStudio?.pickVideoFile) {
@@ -244,7 +273,7 @@ export default function CapcutEditor() {
     setIsPickingVideo(true);
     try {
       const res = await window.clickStudio.pickVideoFile();
-      if (!res || res.canceled) return;
+      if (!res || res.canceled || !("path" in res)) return;
 
       const pickedPath = res.path;
       const nextUrl = toFileUrl(pickedPath);
@@ -318,6 +347,8 @@ export default function CapcutEditor() {
             // Prefer an explicit file path if we have one; otherwise preserve current URL (best effort).
             videoPath: typeof videoUrl === "string" && videoUrl.startsWith("clickstudio://")
               ? decodeURIComponent(videoUrl.replace(/^clickstudio:\/\//, ""))
+              : typeof videoUrl === "string" && videoUrl.startsWith("file://")
+                ? decodeURIComponent(videoUrl.replace(/^file:\/\//, ""))
               : baseVideoPath,
             videoUrl:
               typeof videoUrl === "string" && !videoUrl.startsWith("clickstudio://")
@@ -326,6 +357,8 @@ export default function CapcutEditor() {
             cameraVideoPath:
               typeof cameraVideoUrl === "string" && cameraVideoUrl.startsWith("clickstudio://")
                 ? decodeURIComponent(cameraVideoUrl.replace(/^clickstudio:\/\//, ""))
+                : typeof cameraVideoUrl === "string" && cameraVideoUrl.startsWith("file://")
+                  ? decodeURIComponent(cameraVideoUrl.replace(/^file:\/\//, ""))
                 : null,
             cameraVideoUrl:
               typeof cameraVideoUrl === "string" && !cameraVideoUrl.startsWith("clickstudio://")
@@ -357,6 +390,7 @@ export default function CapcutEditor() {
     cameraVideoUrl,
     clickEventsSource,
     segments,
+    audioTracks,
     selectedBackground,
     padding,
     zoomMode,
@@ -383,6 +417,12 @@ export default function CapcutEditor() {
 
     const onLoadedMetadata = () => {
       setVideoDuration(el.duration || 0);
+      const w = el.videoWidth || 0;
+      const h = el.videoHeight || 0;
+      if (w > 0 && h > 0) {
+        setPreviewAspectRatio(w / h);
+        setIsPortraitVideo(h > w);
+      }
     };
 
     el.addEventListener("loadedmetadata", onLoadedMetadata);
@@ -527,24 +567,9 @@ export default function CapcutEditor() {
 
   const getSourceTimeFromOutputTime = React.useCallback(
     (tOut: number) => {
-      if (!segments.length) return 0;
-      const safeOut = clamp(tOut, 0, outputDuration);
-
-      let cumOut = 0;
-      for (let i = 0; i < segments.length; i++) {
-        const seg = segments[i];
-        const segDur = Math.max(0, seg.srcEnd - seg.srcStart);
-        const isLast = i === segments.length - 1;
-
-        if (safeOut < cumOut + segDur || isLast) {
-          return seg.srcStart + (safeOut - cumOut);
-        }
-        cumOut += segDur;
-      }
-
-      return segments[segments.length - 1].srcEnd;
+      return sourceTimeFromOutputTime(segments, tOut);
     },
-    [segments, outputDuration]
+    [segments]
   );
 
   const getOutputTimeFromSourceTime = React.useCallback(
@@ -902,47 +927,18 @@ export default function CapcutEditor() {
   const handleSplitAt = (tOut: number) => {
     if (isPlaying) return;
     if (!segments.length) return;
-
-    const tSrc = getSourceTimeFromOutputTime(tOut);
-    const idx = getSegmentIndexFromSourceTime(tSrc);
-    if (idx < 0) return;
-
-    const seg = segments[idx];
-    const segDur = seg.srcEnd - seg.srcStart;
-    if (segDur <= 0.08) return;
-
-    const boundary = clamp(tSrc, seg.srcStart + 0.02, seg.srcEnd - 0.02);
-    if (boundary <= seg.srcStart + 0.01 || boundary >= seg.srcEnd - 0.01) return;
-
-    const left: CapcutSegment = { id: makeId(), srcStart: seg.srcStart, srcEnd: boundary };
-    const right: CapcutSegment = { id: makeId(), srcStart: boundary, srcEnd: seg.srcEnd };
-
-    setSegments((prev) => {
-      const next = prev.slice();
-      next.splice(idx, 1, left, right);
-      return next;
-    });
+    setSegments((prev) => splitSegmentAtOutputTime(prev, tOut, makeId) as CapcutSegment[]);
 
     toast.success(`Split at ${formatTimeDisplay(tOut)}`);
   };
 
   const handleDeleteSegment = (segmentId: string) => {
-    if (segments.length <= 1) return;
-    setSegments((prev) => prev.filter((s) => s.id !== segmentId));
+    setSegments((prev) => deleteSegmentById(prev, segmentId) as CapcutSegment[]);
     toast.success("Segment deleted");
   };
 
   const handleReorderSegment = (dragSegmentId: string, insertIndex: number) => {
-    setSegments((prev) => {
-      const fromIndex = prev.findIndex((s) => s.id === dragSegmentId);
-      if (fromIndex < 0) return prev;
-
-      const next = prev.slice();
-      const [seg] = next.splice(fromIndex, 1);
-      const safeInsertIndex = clamp(insertIndex, 0, next.length);
-      next.splice(safeInsertIndex, 0, seg);
-      return next;
-    });
+    setSegments((prev) => reorderSegment(prev, dragSegmentId, insertIndex) as CapcutSegment[]);
   };
 
   const handleExport = async (format: string, quality: string, ratio: string) => {
@@ -954,8 +950,101 @@ export default function CapcutEditor() {
 
       setIsExporting(true);
       setExportProgress(0);
+      setExportStatusText("Preparing export...");
 
-      await exportVideo(
+      const resolveInputPath = () => {
+        const src = videoRef.current?.currentSrc || videoUrl || "";
+        if (src.startsWith("file://")) {
+          return decodeURIComponent(src.replace(/^file:\/\//, ""));
+        }
+        if (src.startsWith("clickstudio://")) {
+          return decodeURIComponent(src.replace(/^clickstudio:\/+/, "/"));
+        }
+        const fromService = screenRecordingService.getCurrentRecordingPath();
+        return fromService ?? null;
+      };
+
+      const resolveLocalPath = (src: string | null) => {
+        if (!src) return null;
+        if (src.startsWith("file://")) {
+          return decodeURIComponent(src.replace(/^file:\/\//, ""));
+        }
+        if (src.startsWith("clickstudio://")) {
+          return decodeURIComponent(src.replace(/^clickstudio:\/+/, "/"));
+        }
+        return null;
+      };
+
+      const cameraPath = resolveLocalPath(cameraVideoUrl);
+      const canNative =
+        Boolean(window.clickStudio?.runNativeExport) && (format === "mp4" || format === "webm");
+      const inputPath = resolveInputPath();
+
+      if (canNative && inputPath) {
+        setExportStatusText("Using native export engine...");
+        nativeExportUnsubRef.current?.();
+        nativeExportUnsubRef.current = window.clickStudio!.onNativeExportProgress((event) => {
+          if (!nativeExportJobIdRef.current) return;
+          if (event.jobId !== nativeExportJobIdRef.current) return;
+          setExportProgress(event.progress);
+          if (event.message) setExportStatusText(event.message);
+        });
+
+        const nativeRes = await window.clickStudio!.runNativeExport({
+          inputPath,
+          segments: segments.map((s) => ({ srcStart: s.srcStart, srcEnd: s.srcEnd })),
+          format: format as "mp4" | "webm",
+          quality: (quality === "2160p" || quality === "1080p" ? quality : "720p") as
+            | "720p"
+            | "1080p"
+            | "2160p",
+          backgroundIndex: selectedBackground,
+          paddingPct: padding,
+          defaultZoomMode: zoomMode,
+          defaultZoomDuration: zoomDuration,
+          showMenu,
+          clicks: clickEventsStitched.map((c) => ({
+            tOut: c.tOut,
+            xNorm: c.xNorm,
+            yNorm: c.yNorm,
+            enabled: c.enabled,
+            zoomModeOverride: c.zoomModeOverride,
+            zoomDurationOverride: c.zoomDurationOverride,
+          })),
+          cameraOverlay: {
+            enabled: cameraOverlayEnabled,
+            path: cameraOverlayEnabled ? cameraPath : null,
+            sizePct: cameraOverlaySizePct,
+            shape: cameraOverlayShape,
+          },
+        });
+        if ("jobId" in nativeRes && nativeRes.jobId) {
+          nativeExportJobIdRef.current = nativeRes.jobId;
+        }
+
+        if (!nativeRes.ok) {
+          const failed = nativeRes as Extract<NativeExportResult, { ok: false }>;
+          if (failed.cancelled) {
+            toast("Export cancelled");
+          } else {
+            throw new Error(failed.error?.message || "Native export failed");
+          }
+        } else {
+          toast.success("Export completed");
+          if (window.clickStudio?.revealInFolder) {
+            void window.clickStudio.revealInFolder(nativeRes.path);
+          }
+        }
+        setIsExporting(false);
+        nativeExportUnsubRef.current?.();
+        nativeExportUnsubRef.current = null;
+        nativeExportJobIdRef.current = null;
+        return;
+      }
+
+      setExportStatusText("Rendering styled export...");
+
+      exportTaskRef.current = createExportTask(
         videoRef.current,
         videoContainerRef.current,
         format,
@@ -971,14 +1060,37 @@ export default function CapcutEditor() {
           cameraShape: cameraOverlayShape,
         }
       );
+      setExportStatusText("Exporting video...");
+      await exportTaskRef.current.promise;
 
+      setExportStatusText("Finalizing file...");
       setIsExporting(false);
+      exportTaskRef.current = null;
     } catch (error) {
-      console.error("Export failed:", error);
-      toast.error("Failed to export video");
+      const message = error instanceof Error ? error.message : "";
+      if (message.toLowerCase().includes("cancel")) {
+        toast("Export cancelled");
+      } else {
+        console.error("Export failed:", error);
+        toast.error(message || "Failed to export video");
+      }
       setIsExporting(false);
+      exportTaskRef.current = null;
+      nativeExportUnsubRef.current?.();
+      nativeExportUnsubRef.current = null;
+      nativeExportJobIdRef.current = null;
     }
   };
+
+  const cancelExport = React.useCallback(() => {
+    if (!isExporting) return;
+    const jobId = nativeExportJobIdRef.current;
+    if (jobId && window.clickStudio?.cancelNativeExport) {
+      void window.clickStudio.cancelNativeExport(jobId);
+    }
+    exportTaskRef.current?.cancel();
+    setExportStatusText("Cancelling...");
+  }, [isExporting]);
 
   const togglePlayPause = React.useCallback(() => {
     if (!videoRef.current) return;
@@ -1042,45 +1154,66 @@ export default function CapcutEditor() {
   }, [togglePlayPause]);
 
   return (
-    <div className="flex flex-col min-h-screen">
-      <MainNav />
-
-      <main className="flex-1 px-6 py-4 flex flex-col">
-        <div className="max-w-7xl w-full mx-auto flex-1 flex flex-col">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center">
-              <Button variant="ghost" className="mr-2">
-                <a href="/">
-                  <ChevronLeft className="h-4 w-4 mr-1" />
-                  Back
-                </a>
-              </Button>
-              <h1 className="text-2xl font-semibold">{projectTitle}</h1>
-            </div>
-
-            <div className="flex items-center space-x-2">
-              <Button variant="outline" size="sm">
-                <Save className="h-4 w-4 mr-2" />
-                Save
-              </Button>
-              <Button variant="outline" size="sm" onClick={togglePlayPause}>
-                {isPlaying ? <Pause className="h-4 w-4 mr-2" /> : <Play className="h-4 w-4 mr-2" />}
-                {isPlaying ? "Pause" : "Play"}
-              </Button>
-            </div>
+    <div className="flex flex-col h-screen overflow-hidden">
+      <MainNav
+        centerContent={
+          isEditingTitle ? (
+            <input
+              ref={titleInputRef}
+              value={projectTitle}
+              onChange={(e) => setProjectTitle(e.target.value)}
+              onBlur={() => setIsEditingTitle(false)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  setIsEditingTitle(false);
+                } else if (e.key === "Escape") {
+                  setIsEditingTitle(false);
+                }
+              }}
+              className="w-[min(520px,60vw)] bg-transparent text-center font-semibold text-base text-white/90 outline-none border border-white/10 rounded-md px-3 py-1.5 focus:border-white/25"
+            />
+          ) : (
+            <button
+              type="button"
+              className="max-w-[min(520px,60vw)] truncate text-base font-semibold text-white/90 hover:text-white"
+              title="Double-click to rename"
+              onDoubleClick={() => setIsEditingTitle(true)}
+              onClick={() => {
+                // single click does nothing; keep behavior consistent with native editors
+              }}
+            >
+              {projectTitle || "Untitled draft"}
+            </button>
+          )
+        }
+        rightContent={
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm">
+              <Save className="h-4 w-4 mr-2" />
+              Save
+            </Button>
+            <Button variant="outline" size="sm" onClick={togglePlayPause}>
+              {isPlaying ? <Pause className="h-4 w-4 mr-2" /> : <Play className="h-4 w-4 mr-2" />}
+              {isPlaying ? "Pause" : "Play"}
+            </Button>
           </div>
+        }
+        hideDefaultRight
+      />
 
-          <div className="flex flex-row gap-4">
+      <main className="flex-1 px-6 py-4 flex flex-col overflow-hidden">
+        <div className="w-full flex-1 flex flex-col min-h-0">
+          <div className="flex flex-row gap-4 flex-1 min-h-0 overflow-hidden">
             <div
               style={{
-                aspectRatio: 3 / 2,
+                aspectRatio: previewAspectRatio,
               }}
-              className="relative w-full h-full border flex justify-center items-center rounded-lg shadow-lg overflow-hidden mb-4"
+              className="relative w-full flex-1 min-h-0 border flex justify-center items-center rounded-lg shadow-lg overflow-hidden"
             >
               <div
                 ref={videoContainerRef}
                 style={{
-                  aspectRatio: 3 / 2,
+                  aspectRatio: previewAspectRatio,
                 }}
                 id="video-container"
                 className={`h-full w-full flex flex-row justify-center items-center shadow-xl ${backgrounds[selectedBackground]} backdrop-blur-sm`}
@@ -1089,7 +1222,8 @@ export default function CapcutEditor() {
                   ref={zoomFrameRef}
                   className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black will-change-transform`}
                   style={{
-                    width: `${videoRef.current?.videoWidth > 500 ? "90%" : "300px"}`,
+                    width: isPortraitVideo ? "auto" : `${videoRef.current?.videoWidth > 500 ? "90%" : "300px"}`,
+                    height: isPortraitVideo ? "90%" : "auto",
                     transformOrigin: "0 0",
                     transform: `translate(${translateX}px, ${translateY}px) scale(${totalScale})`,
                   }}
@@ -1168,35 +1302,7 @@ export default function CapcutEditor() {
                   ) : null}
                 </div>
 
-                {/* Visual indicators for click-triggered zoom. */}
-                <div className="absolute inset-0 pointer-events-none">
-                  {activeZoomClick ? (
-                    <>
-                      {/* During zoom we pan+scale to the click point, so it lands center. */}
-                      <MousePointer2
-                        className="absolute top-1/2 left-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
-                        aria-hidden="true"
-                      />
-
-                      <div className="absolute top-3 left-3 pointer-events-auto">
-                        <div className="glass-card px-3 py-2 rounded-lg text-xs">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono">
-                              Zoom @ {formatTimeDisplay(activeZoomClick.tOut)}
-                            </span>
-                            <button
-                              type="button"
-                              className="ml-2 rounded-md bg-destructive/15 hover:bg-destructive/25 text-destructive px-2 py-1"
-                              onClick={handleDeleteActiveZoomClick}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  ) : null}
-                </div>
+                {/* Visual indicators for click-triggered zoom removed (kept zoom behavior). */}
               </div>
             </div>
 
@@ -1239,8 +1345,10 @@ export default function CapcutEditor() {
                 toast.success("Deleted zoom point");
               }}
               handleExport={handleExport}
+              cancelExport={cancelExport}
               isExporting={isExporting}
               exportProgress={exportProgress}
+              exportStatusText={exportStatusText}
               showMenu={showMenu}
               setShowMenu={setShowMenu}
               cameraOverlayAvailable={Boolean(cameraVideoUrl)}
@@ -1253,7 +1361,7 @@ export default function CapcutEditor() {
             />
           </div>
 
-          <div className="py-3">
+          <div className="pt-3 shrink-0">
             <CapcutTimelineEditor
               outputDuration={outputDuration}
               outputTime={outputTime}
@@ -1268,14 +1376,7 @@ export default function CapcutEditor() {
                 setSegments((prev) =>
                   prev.map((s) => {
                     if (s.id !== segmentId) return s;
-                    const minDur = 0.05;
-                    const nextStart =
-                      typeof patch.srcStart === "number" ? patch.srcStart : s.srcStart;
-                    const nextEnd =
-                      typeof patch.srcEnd === "number" ? patch.srcEnd : s.srcEnd;
-                    const clampedStart = clamp(nextStart, 0, Math.max(0, videoDuration - minDur));
-                    const clampedEnd = clamp(nextEnd, clampedStart + minDur, Math.max(clampedStart + minDur, videoDuration));
-                    return { ...s, srcStart: clampedStart, srcEnd: clampedEnd };
+                    return trimSegment(s, patch, videoDuration) as CapcutSegment;
                   })
                 );
               }}

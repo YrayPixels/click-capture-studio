@@ -363,6 +363,7 @@ export const exportVideo = async (
     cameraVideoEl?: HTMLVideoElement | null;
     cameraOverlayEl?: HTMLElement | null;
     cameraShape?: "rect" | "circle";
+    signal?: AbortSignal;
   }
 ): Promise<void> => {
   try {
@@ -493,8 +494,20 @@ export const exportVideo = async (
     };
 
     return new Promise((resolve, reject) => {
+      const rejectIfAborted = () => {
+        if (!options?.signal?.aborted) return false;
+        reject(new Error("Export cancelled"));
+        return true;
+      };
+
+      if (rejectIfAborted()) return;
+
       mediaRecorder.onstop = async () => {
         try {
+          if (options?.signal?.aborted) {
+            reject(new Error("Export cancelled"));
+            return;
+          }
           onProgress(95);
           toast.info("Finalizing export...");
 
@@ -572,6 +585,7 @@ export const exportVideo = async (
         let lastProgress = 10;
         const totalDuration = videoRef.duration || 0;
         const progressInterval = setInterval(() => {
+          if (options?.signal?.aborted) return;
           if (videoRef && totalDuration > 0) {
             const currentProgress = 10 + (videoRef.currentTime / totalDuration) * 85;
             lastProgress = Math.min(95, currentProgress);
@@ -591,6 +605,16 @@ export const exportVideo = async (
 
         const captureFrame = async () => {
           try {
+            if (options?.signal?.aborted) {
+              clearInterval(progressInterval);
+              if (boundingWrapper.parentNode) {
+                document.body.removeChild(boundingWrapper);
+              }
+              if (mediaRecorder.state === "recording") {
+                mediaRecorder.stop();
+              }
+              return;
+            }
             if (videoRef.paused || videoRef.ended) {
               clearInterval(progressInterval);
               // Clean up
@@ -728,6 +752,7 @@ export const exportVideo = async (
 
         // Set a maximum recording time as a safeguard
         setTimeout(() => {
+          if (options?.signal?.aborted) return;
           if (mediaRecorder.state === 'recording') {
             mediaRecorder.stop();
           }

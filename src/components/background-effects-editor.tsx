@@ -35,8 +35,10 @@ interface BackgroundEffectProp {
   zoomDuration: number;
   setZoomDuration: (duration: number) => void;
   handleExport: (format: string, quality: string, ratio: string) => void;
+  cancelExport?: () => void;
   isExporting: boolean;
   exportProgress: number;
+  exportStatusText?: string;
   showMenu: boolean;
   setShowMenu: (showMenu: boolean) => void;
 
@@ -62,8 +64,10 @@ interface BackgroundEffectProp {
 
 export function BackgroundEffectEditor({
   handleExport,
+  cancelExport,
   isExporting,
   exportProgress,
+  exportStatusText,
   backgrounds,
   setSelectedBackground,
   selectedBackground,
@@ -94,7 +98,7 @@ export function BackgroundEffectEditor({
   };
 
   return (
-    <div className="bg-card rounded-lg border shadow-sm p-4 w-4/12">
+    <div className="bg-card rounded-lg border shadow-sm p-4 w-4/12 max-h-full overflow-y-auto">
       <Tabs defaultValue="background" className="w-full">
         <TabsList className="grid grid-cols-3 mb-4 max-w-xs">
           <TabsTrigger value="background">Background</TabsTrigger>
@@ -133,8 +137,10 @@ export function BackgroundEffectEditor({
           <div className="mt-4">
             <ExportPanel
               onExport={handleExport}
+              onCancelExport={cancelExport}
               isExporting={isExporting}
               progress={exportProgress}
+              statusText={exportStatusText}
             />
           </div>
         </TabsContent>

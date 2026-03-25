@@ -38,6 +38,7 @@ export default function Editor() {
   const zoomFrameRef = React.useRef<HTMLDivElement>(null);
   const [showInput, setShowInput] = React.useState(false);
   const [projectTitle, setProjectTitle] = React.useState(id === "new" ? "Untitled Project" : "Project Demo");
+  const titleInputRef = React.useRef<HTMLInputElement>(null);
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [splitPoints, setSplitPoints] = React.useState<number[]>([]);
   const [deletedRanges, setDeletedRanges] = React.useState<
@@ -47,6 +48,8 @@ export default function Editor() {
   const isSeekingRef = React.useRef(false);
   const videoContainerRef = React.useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = React.useState(0);
+  const [previewAspectRatio, setPreviewAspectRatio] = React.useState<number>(3 / 2);
+  const [isPortraitVideo, setIsPortraitVideo] = React.useState(false);
   const [showMenu, setShowMenu] = React.useState(true);
   const [clickEvents, setClickEvents] = React.useState<ClickEvent[]>([]);
   const [zoomMode, setZoomMode] = React.useState<"off" | "low" | "medium" | "high">("medium");
@@ -97,6 +100,12 @@ export default function Editor() {
     const handleLoadedMetadata = () => {
       if (videoRef.current) {
         setVideoDuration(videoRef.current.duration);
+        const w = videoRef.current.videoWidth || 0;
+        const h = videoRef.current.videoHeight || 0;
+        if (w > 0 && h > 0) {
+          setPreviewAspectRatio(w / h);
+          setIsPortraitVideo(h > w);
+        }
       }
     };
 
@@ -417,65 +426,71 @@ export default function Editor() {
 
   return (
     <div className="flex flex-col min-h-screen">
-      <MainNav />
+      <MainNav
+        centerContent={
+          showInput ? (
+            <input
+              ref={titleInputRef}
+              type="text"
+              value={projectTitle}
+              className="w-[min(520px,60vw)] bg-transparent text-center font-semibold text-base text-white/90 outline-none border border-white/10 rounded-md px-3 py-1.5 focus:border-white/25"
+              onBlur={() => setShowInput(false)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") setShowInput(false);
+                if (e.key === "Escape") setShowInput(false);
+              }}
+              onChange={(e) => {
+                clearTimeout(timeOut);
+                setProjectTitle(e.target.value);
+                timeOut = setTimeout(() => {
+                  setShowInput(false);
+                }, 4000);
+              }}
+            />
+          ) : (
+            <button
+              type="button"
+              className="max-w-[min(520px,60vw)] truncate text-base font-semibold text-white/90 hover:text-white"
+              onDoubleClick={() => {
+                setShowInput(true);
+                window.setTimeout(() => {
+                  titleInputRef.current?.focus();
+                  titleInputRef.current?.select();
+                }, 0);
+              }}
+            >
+              {projectTitle}
+            </button>
+          )
+        }
+        rightContent={
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm">
+              <Save className="h-4 w-4 mr-2" />
+              Save
+            </Button>
+            <Button variant="outline" size="sm" onClick={togglePlayPause}>
+              <Play className="h-4 w-4 mr-2" />
+              {isPlaying ? "Pause" : "Play"}
+            </Button>
+          </div>
+        }
+        hideDefaultRight
+      />
 
       <main className="flex-1 px-6 py-4 flex flex-col">
-        <div className="max-w-7xl w-full mx-auto flex-1 flex flex-col">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center">
-              <Button variant="ghost" className="mr-2">
-                <a href="/">
-                  <ChevronLeft className="h-4 w-4 mr-1" />
-                  Back
-                </a>
-              </Button>
-              {!showInput ? (
-                <h1 className="text-2xl font-semibold cursor-pointer" onDoubleClick={() => setShowInput(true)}>
-                  {projectTitle}
-                </h1>
-              ) : (
-                <input
-                  type="text"
-                  value={projectTitle}
-                  className="border border-blue-500 rounded-sm p-2"
-                  onChange={(e) => {
-                    clearTimeout(timeOut);
-                    setProjectTitle(e.target.value);
-                    timeOut = setTimeout(() => {
-                      setShowInput(false);
-                    }, 4000);
-                  }}
-                />
-              )}
-            </div>
-
-            <div className="flex items-center space-x-2">
-              <Button variant="outline" size="sm">
-                <Save className="h-4 w-4 mr-2" />
-                Save
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={togglePlayPause}
-              >
-                <Play className="h-4 w-4 mr-2" />
-                {isPlaying ? "Pause" : "Play"}
-              </Button>
-            </div>
-          </div>
-
+        <div className="w-full flex-1 flex flex-col">
           <div className="flex flex-row gap-4">
             <div
               style={{
-                aspectRatio: 3 / 2
+                aspectRatio: previewAspectRatio
               }}
               className="relative w-full h-full border flex justify-center items-center rounded-lg shadow-lg overflow-hidden mb-4"
             >
               <div
                 ref={videoContainerRef}
                 style={{
-                  aspectRatio: 3 / 2,
+                  aspectRatio: previewAspectRatio,
                 }}
                 id="video-container"
                 className={`h-full w-full flex flex-row justify-center items-center shadow-xl ${backgrounds[selectedBackground]} backdrop-blur-sm`}
@@ -484,7 +499,8 @@ export default function Editor() {
                   ref={zoomFrameRef}
                   className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black will-change-transform`}
                   style={{
-                    width: `${videoRef.current?.videoWidth > 500 ? '90%' : '300px'}`,
+                    width: isPortraitVideo ? "auto" : `${videoRef.current?.videoWidth > 500 ? "90%" : "300px"}`,
+                    height: isPortraitVideo ? "90%" : "auto",
                     transformOrigin: "0 0",
                     transform: `translate(${translateX}px, ${translateY}px) scale(${totalScale})`,
                   }}
