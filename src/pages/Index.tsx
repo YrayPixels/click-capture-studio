@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Camera, Clock, Mic, Monitor, Sparkles } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { MainNav } from "@/components/main-nav";
@@ -9,12 +10,32 @@ import { Separator } from "@/components/ui/separator";
 
 export default function Index() {
   const [isRecordingModalOpen, setRecordingModalOpen] = React.useState(false);
+  const [drafts, setDrafts] = React.useState<
+    Array<{ id: string; title: string; updatedAt: string; createdAt?: string }>
+  >([]);
+  const navigate = useNavigate();
 
   const handleStartRecording = () => {
     setRecordingModalOpen(false);
-    // In a real app, this would start the recording and navigate to the recording page
-    window.location.href = "/recording";
+    navigate("/recording");
   };
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!window.clickStudio?.listDrafts) return;
+      try {
+        const res = await window.clickStudio.listDrafts();
+        if (cancelled) return;
+        setDrafts(res ?? []);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -134,6 +155,71 @@ export default function Index() {
               </Card>
             </div>
           </div>
+
+          {drafts.length ? (
+            <div className="mt-10">
+              <div className="flex items-end justify-between gap-4 mb-4">
+                <div>
+                  <div className="text-sm text-muted-foreground">Drafts</div>
+                  <div className="text-2xl font-semibold tracking-tight">Continue editing</div>
+                </div>
+                <Badge variant="outline" className="font-normal">
+                  Saved in Documents
+                </Badge>
+              </div>
+
+              <div className="rounded-xl border bg-card overflow-hidden">
+                <div className="w-full overflow-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/40 text-muted-foreground">
+                      <tr className="[&>th]:px-4 [&>th]:py-3 [&>th]:text-left [&>th]:font-medium">
+                        <th>Title</th>
+                        <th>Last updated</th>
+                        <th className="w-[120px]">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="[&>tr]:border-t">
+                      {drafts.map((d) => (
+                        <tr
+                          key={d.id}
+                          className="hover:bg-muted/30 cursor-pointer"
+                          role="link"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            const target = e.target as HTMLElement | null;
+                            if (target?.closest("a")) return;
+                            navigate(`/editor/draft_${encodeURIComponent(d.id)}`);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Enter" && e.key !== " ") return;
+                            e.preventDefault();
+                            navigate(`/editor/draft_${encodeURIComponent(d.id)}`);
+                          }}
+                        >
+                          <td className="px-4 py-3">
+                            <Link
+                              to={`/editor/draft_${encodeURIComponent(d.id)}`}
+                              className="font-medium hover:underline"
+                            >
+                              {d.title}
+                            </Link>
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            {new Date(d.updatedAt).toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3">
+                            <Badge variant="secondary" className="font-normal">
+                              Draft
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </main>
 

@@ -1,73 +1,81 @@
-# Welcome to your Lovable project
+# Click Studio
 
-## Project info
+Click Studio is an Electron desktop app for **screen recording with click markers** and a **built-in editor** for fast, click-focused edits.
 
-**URL**: https://lovable.dev/projects/bdf6d76b-1ad4-4810-be98-c0bdbd14e934
+## Features
 
-## How can I edit this code?
+- **Record**: Screen, camera, or both
+- **Audio**: System audio + microphone (mixed to a single track when needed)
+- **Click tracking**: Captures global clicks in Electron (with a browser fallback)
+- **Drafts**: Saves drafts locally so you can resume editing from Home
 
-There are several ways of editing your application.
+## Tech stack
 
-**Use Lovable**
+- Electron + `electron-vite`
+- Vite + React + TypeScript
+- Tailwind + shadcn/ui
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/bdf6d76b-1ad4-4810-be98-c0bdbd14e934) and start prompting.
+## Getting started
 
-Changes made via Lovable will be committed automatically to this repo.
+### Prerequisites
 
-**Use your preferred IDE**
+- Node.js + npm
+- macOS users: you may need to grant **Accessibility** and/or **Input Monitoring** permissions for global click tracking.
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+### Install
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+npm install
+```
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+### Run (Electron app)
 
-# Step 3: Install the necessary dependencies.
-npm i
+```sh
+npm run electron:dev
+```
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+### Run (web-only UI)
+
+This starts Vite without Electron (useful for UI work, but Electron-only features like desktop capture picking and global click capture won’t work).
+
+```sh
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+## Build
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+### Build app bundles
 
-**Use GitHub Codespaces**
+```sh
+npm run electron:build
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+### Build macOS distributable
 
-## What technologies are used for this project?
+```sh
+npm run dist:mac
+```
 
-This project is built with:
+## Troubleshooting
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+### Global click tracking is disabled (macOS)
 
-## How can I deploy this project?
+If you see an error about global click tracking being disabled, enable permissions for Click Studio:
 
-Simply open [Lovable](https://lovable.dev/projects/bdf6d76b-1ad4-4810-be98-c0bdbd14e934) and click on Share -> Publish.
+- **System Settings → Privacy & Security → Accessibility**
+- **System Settings → Privacy & Security → Input Monitoring**
 
-## Can I connect a custom domain to my Lovable project?
+Then fully quit and restart the app.
 
-Yes, you can!
+### Recording works in browser but not in Electron
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+In Electron, screen capture relies on an in-app picker that provides a `chromeMediaSourceId`. If no source is selected, recording will fail.
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/tips-tricks/custom-domain#step-by-step-guide)
+## Scripts
+
+- `npm run dev`: Vite dev server (web-only)
+- `npm run build`: Vite build (web assets)
+- `npm run electron:dev`: Electron dev (recommended)
+- `npm run electron:build`: Build Electron main/preload + renderer
+- `npm run electron:preview`: Preview built Electron app
+- `npm run dist:mac`: Build + package for macOS via electron-builder

@@ -9,9 +9,19 @@ import { screenRecordingService, type ClickEvent } from "@/services/screen-recor
 import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
 import { BackgroundEffectEditor } from "@/components/background-effects-editor";
-import { VideoPreview } from "@/components/video-preview/VideoPreview";
 import { exportVideo, formatTimeDisplay } from "@/utils/videoExport";
 import { backgrounds } from "@/services/color";
+
+function toClickstudioUrl(absPath: string) {
+  const encoded = encodeURI(absPath);
+  const url = `clickstudio://${encoded}`;
+  return url.replace(/^clickstudio:\/{2,}/, "clickstudio:///");
+}
+
+function toFileUrl(absPath: string) {
+  const encoded = encodeURI(absPath);
+  return `file://${encoded}`;
+}
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>();
@@ -20,6 +30,8 @@ export default function Editor() {
   const [exportProgress, setExportProgress] = React.useState(0);
   const [showExportPanel, setShowExportPanel] = React.useState(false);
   const [videoUrl, setVideoUrl] = React.useState<string | null>(null);
+  const [videoLoadError, setVideoLoadError] = React.useState<string | null>(null);
+  const [isPickingVideo, setIsPickingVideo] = React.useState(false);
   const [selectedBackground, setSelectedBackground] = React.useState<number>(0);
   const [padding, setPadding] = React.useState(100);
   const videoRef = React.useRef<HTMLVideoElement>(null);
@@ -38,8 +50,7 @@ export default function Editor() {
   const [showMenu, setShowMenu] = React.useState(true);
   const [clickEvents, setClickEvents] = React.useState<ClickEvent[]>([]);
   const [zoomMode, setZoomMode] = React.useState<"off" | "low" | "medium" | "high">("medium");
-  // Default per spec: 0.5s, but user can edit.
-  const [zoomDuration, setZoomDuration] = React.useState<number>(0.5);
+  const [zoomDuration, setZoomDuration] = React.useState<number>(1.0);
 
   React.useEffect(() => {
     if (id === "new") {
@@ -47,14 +58,36 @@ export default function Editor() {
       console.log("Recording video URL:", recordingVideoUrl);
       if (recordingVideoUrl) {
         setVideoUrl(recordingVideoUrl);
+        setVideoLoadError(null);
         setClickEvents(screenRecordingService.getClickEvents());
       } else {
         toast.error("No recording found. Please record a video first.");
       }
     } else if (id) {
-      setVideoUrl(`/videos/${id}`);
+      // Older flow expected a server route (/videos/:id). Prefer explicit file pick instead.
+      setVideoUrl(null);
+      setVideoLoadError("No video linked. Pick a local file to edit.");
     }
   }, [id]);
+
+  const handlePickVideo = React.useCallback(async () => {
+    if (!window.clickStudio?.pickVideoFile) {
+      toast.error("File picker not available");
+      return;
+    }
+    setIsPickingVideo(true);
+    try {
+      const res = await window.clickStudio.pickVideoFile();
+      if (!res || res.canceled) return;
+      setVideoUrl(toFileUrl(res.path));
+      setVideoLoadError(null);
+    } catch (e) {
+      console.error("[video] pick failed", e);
+      toast.error("Failed to pick video");
+    } finally {
+      setIsPickingVideo(false);
+    }
+  }, []);
 
   React.useEffect(() => {
     deletedRangesRef.current = deletedRanges;
@@ -207,43 +240,88 @@ export default function Editor() {
   };
 
   React.useEffect(() => {
-    const handleVideoEvents = () => {
-      if (videoRef.current) {
-        videoRef.current.ontimeupdate = () => {
-          if (videoRef.current) {
-            const t = videoRef.current.currentTime;
-            const adjusted = adjustTimeForDeletedRanges(t);
+    const el = videoRef.current;
+    if (!el) return;
 
-            // Avoid recursive seeks triggering a storm.
-            if (Math.abs(adjusted - t) > 0.01 && !isSeekingRef.current) {
-              isSeekingRef.current = true;
-              videoRef.current.currentTime = adjusted;
-              setCurrentTime(adjusted);
-              requestAnimationFrame(() => {
-                isSeekingRef.current = false;
-              });
-              return;
-            }
+    el.onended = () => setIsPlaying(false);
+    return () => {
+      el.onended = null;
+    };
+  }, [videoUrl]);
 
-            setCurrentTime(adjusted);
+  React.useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+
+    const tick = () => {
+      const t = el.currentTime;
+      const adjusted = adjustTimeForDeletedRanges(t);
+
+      // If playback time lands in a deleted range, nudge the video forward once.
+      if (Math.abs(adjusted - t) > 0.01 && !isSeekingRef.current) {
+        isSeekingRef.current = true;
+        el.currentTime = adjusted;
+        setCurrentTime(adjusted);
+        requestAnimationFrame(() => {
+          isSeekingRef.current = false;
+        });
+      } else {
+        setCurrentTime(adjusted);
+      }
+
+    };
+
+    // Prefer requestVideoFrameCallback for smoother, frame-accurate updates.
+    const anyEl = el as unknown as {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+      cancelVideoFrameCallback?: (id: number) => void;
+    };
+    let rvfcId: number | null = null;
+    let rafId: number | null = null;
+
+    const start = () => {
+      if (!isPlaying) return;
+      if (anyEl.requestVideoFrameCallback) {
+        if (rvfcId != null) return;
+        const onFrame = () => {
+          rvfcId = null;
+          if (el.paused || el.ended) return;
+          tick();
+          rvfcId = anyEl.requestVideoFrameCallback!(onFrame);
+        };
+        rvfcId = anyEl.requestVideoFrameCallback(onFrame);
+      } else {
+        if (rafId != null) return;
+        const loop = () => {
+          if (!isPlaying) {
+            rafId = null;
+            return;
           }
+          tick();
+          rafId = requestAnimationFrame(loop);
         };
-
-        videoRef.current.onended = () => {
-          setIsPlaying(false);
-        };
+        rafId = requestAnimationFrame(loop);
       }
     };
 
-    handleVideoEvents();
+    const stop = () => {
+      if (rvfcId != null) {
+        anyEl.cancelVideoFrameCallback?.(rvfcId);
+        rvfcId = null;
+      }
+      if (rafId != null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    };
+
+    stop();
+    start();
 
     return () => {
-      if (videoRef.current) {
-        videoRef.current.ontimeupdate = null;
-        videoRef.current.onended = null;
-      }
+      stop();
     };
-  }, [videoRef.current]);
+  }, [isPlaying, videoUrl, videoDuration, deletedRanges]);
 
   // If the user deletes a section that currently contains the playhead,
   // immediately jump to the next kept time.
@@ -263,6 +341,10 @@ export default function Editor() {
   }, [deletedRanges]);
 
   const computeZoomTransform = () => {
+    const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
+    const easeInOutCubic = (t: number) =>
+      t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
     const baseScale = padding / 100;
 
     // Default: just base scale (driven by the existing "Scale" slider).
@@ -294,15 +376,23 @@ export default function Editor() {
       Math.max(0, (currentTime - activeClick.t) / zoomDuration)
     );
 
-    // Ease for nicer camera motion (easeInOutCubic).
-    const eased =
-      progress < 0.5
-        ? 4 * progress * progress * progress
-        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+    // Instead of immediately centering the click at scale=1 (which "jumps"),
+    // animate pan separately: pan in → zoom in/out → pan back.
+    const panLead = 0.18;
+    const panTail = 0.18;
+    const zoomWindow = Math.max(0.001, 1 - panLead - panTail);
+
+    const panIn = easeInOutCubic(clamp(progress / panLead, 0, 1));
+    const panOut = easeInOutCubic(clamp((1 - progress) / panTail, 0, 1));
+    const panFactor = progress < panLead ? panIn : progress > 1 - panTail ? panOut : 1;
+
+    const zoomT = clamp((progress - panLead) / zoomWindow, 0, 1);
+    const zoomPhase = zoomT <= 0.5 ? zoomT * 2 : (1 - zoomT) * 2; // 0→1→0
+    const zoomEased = easeInOutCubic(zoomPhase);
 
     const zoomMultiplier =
       1 +
-      (maxScaleByMode[zoomMode] - 1) * eased;
+      (maxScaleByMode[zoomMode] - 1) * zoomEased;
 
     totalScale = baseScale * zoomMultiplier;
 
@@ -312,8 +402,10 @@ export default function Editor() {
 
     if (w > 0 && h > 0) {
       // Keep the clicked point at the center of the video frame while zooming.
-      translateX = (0.5 - totalScale * activeClick.xNorm) * w;
-      translateY = (0.5 - totalScale * activeClick.yNorm) * h;
+      const targetX = (0.5 - totalScale * activeClick.xNorm) * w;
+      const targetY = (0.5 - totalScale * activeClick.yNorm) * h;
+      translateX = targetX * panFactor;
+      translateY = targetY * panFactor;
     }
 
     return { totalScale, translateX, translateY };
@@ -390,7 +482,7 @@ export default function Editor() {
               >
                 <div
                   ref={zoomFrameRef}
-                  className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black transition-transform duration-150 ease-out will-change-transform`}
+                  className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black will-change-transform`}
                   style={{
                     width: `${videoRef.current?.videoWidth > 500 ? '90%' : '300px'}`,
                     transformOrigin: "0 0",
@@ -410,6 +502,14 @@ export default function Editor() {
                       <video
                         ref={videoRef}
                         src={videoUrl}
+                        onError={() => {
+                          if (videoUrl?.startsWith("file://")) {
+                            const absPath = decodeURIComponent(videoUrl.replace(/^file:\/\//, ""));
+                            setVideoUrl(toClickstudioUrl(absPath));
+                            return;
+                          }
+                          setVideoLoadError("Failed to load video");
+                        }}
                         className="w-full h-full object-contain transition-transform duration-300"
                         controls={false}
                       />
@@ -418,6 +518,25 @@ export default function Editor() {
                         <Play className="h-16 w-16 text-white/50" />
                       </div>
                     )}
+                    {videoLoadError ? (
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="glass-card rounded-lg px-4 py-3 text-xs text-white/80 border border-white/15 max-w-[520px]">
+                          {videoLoadError}
+                          {window.clickStudio?.pickVideoFile ? (
+                            <div className="mt-3 flex justify-end">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={isPickingVideo}
+                                onClick={handlePickVideo}
+                              >
+                                {isPickingVideo ? "Opening…" : "Pick video file…"}
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>

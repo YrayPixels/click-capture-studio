@@ -1,12 +1,13 @@
 import * as React from "react";
 import { useParams } from "react-router-dom";
-import { ChevronLeft, Play, Save, Pause } from "lucide-react";
+import { ChevronLeft, Play, Save, Pause, MousePointer2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MainNav } from "@/components/main-nav";
 import { BackgroundEffectEditor } from "@/components/background-effects-editor";
 import {
   CapcutTimelineEditor,
   type CapcutSegment,
+  type AudioTrack,
   type TimelineClickMarker,
 } from "@/components/capcut-timeline-editor";
 import { toast } from "sonner";
@@ -15,6 +16,31 @@ import { backgrounds } from "@/services/color";
 import { exportVideo, formatTimeDisplay } from "@/utils/videoExport";
 
 type ZoomMode = "off" | "low" | "medium" | "high";
+
+type ClickEventWithZoom = ClickEvent & {
+  enabled?: boolean;
+  zoomModeOverride?: ZoomMode;
+  zoomDurationOverride?: number;
+};
+
+function toClickstudioUrl(absPath: string) {
+  const encoded = encodeURI(absPath);
+  const url = `clickstudio://${encoded}`;
+  return url.replace(/^clickstudio:\/{2,}/, "clickstudio:///");
+}
+
+function toFileUrl(absPath: string) {
+  // Prefer direct file:// so the editor can open arbitrary local files.
+  // Some Electron dev setups can block file:// from an http:// origin; we fallback to clickstudio:// on error.
+  const encoded = encodeURI(absPath);
+  return `file://${encoded}`;
+}
+
+function guessMissingVideoMessage(url: string) {
+  const isBare = /^clickstudio:\/\/\/recording-.*\.(webm|mp4|mov)$/i.test(url);
+  if (isBare) return "This draft points to a recording filename, but the file isn't on disk.";
+  return "Failed to load video";
+}
 
 function makeId() {
   return `seg_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -31,6 +57,9 @@ type ClickEventStitched = {
   // Normalized click position within the video surface
   xNorm: number;
   yNorm: number;
+  enabled?: boolean;
+  zoomModeOverride?: ZoomMode;
+  zoomDurationOverride?: number;
   // Index into clickEventsSource (used for deletion)
   sourceIndex: number;
 };
@@ -39,6 +68,7 @@ export default function CapcutEditor() {
   const { id } = useParams<{ id: string }>();
 
   const [videoUrl, setVideoUrl] = React.useState<string | null>(null);
+  const [videoLoadError, setVideoLoadError] = React.useState<string | null>(null);
   const [cameraVideoUrl, setCameraVideoUrl] = React.useState<string | null>(null);
   const [videoDuration, setVideoDuration] = React.useState(0); // source duration (seconds)
 
@@ -63,7 +93,7 @@ export default function CapcutEditor() {
     return offsets;
   }, [segments]);
 
-  const [clickEventsSource, setClickEventsSource] = React.useState<ClickEvent[]>([]);
+  const [clickEventsSource, setClickEventsSource] = React.useState<ClickEventWithZoom[]>([]);
   const [clickEventsStitched, setClickEventsStitched] = React.useState<
     ClickEventStitched[]
   >([]);
@@ -76,7 +106,7 @@ export default function CapcutEditor() {
   const [padding, setPadding] = React.useState(100);
 
   const [zoomMode, setZoomMode] = React.useState<ZoomMode>("medium");
-  const [zoomDuration, setZoomDuration] = React.useState<number>(0.5); // seconds
+  const [zoomDuration, setZoomDuration] = React.useState<number>(1.0); // seconds
 
   const [showMenu, setShowMenu] = React.useState(true);
 
@@ -85,6 +115,14 @@ export default function CapcutEditor() {
     "rect"
   );
   const [cameraOverlaySizePct, setCameraOverlaySizePct] = React.useState(22);
+
+  // Timeline viewport (CapCut-like zoomable/scrollable timeline surface)
+  const [timelinePxPerSecond, setTimelinePxPerSecond] = React.useState(90);
+  const [timelineScrollSec, setTimelineScrollSec] = React.useState(0);
+
+  const [selectedClickMarkerId, setSelectedClickMarkerId] = React.useState<string | null>(null);
+
+  const [audioTracks, setAudioTracks] = React.useState<AudioTrack[]>([]);
 
   const [isExporting, setIsExporting] = React.useState(false);
   const [exportProgress, setExportProgress] = React.useState(0);
@@ -99,6 +137,18 @@ export default function CapcutEditor() {
   const [projectTitle, setProjectTitle] = React.useState(
     id === "new" ? "Untitled Project" : "Project Demo"
   );
+  const draftId = React.useMemo(() => {
+    if (!id) return null;
+    if (!id.startsWith("draft_")) return null;
+    // `:id` params can be URL-encoded; decode so main-process sanitization matches.
+    try {
+      return decodeURIComponent(id.slice("draft_".length));
+    } catch {
+      return id.slice("draft_".length);
+    }
+  }, [id]);
+  const draftCreatedAtRef = React.useRef<string | null>(null);
+  const [isPickingVideo, setIsPickingVideo] = React.useState(false);
 
   React.useEffect(() => {
     outputTimeRef.current = outputTime;
@@ -113,11 +163,66 @@ export default function CapcutEditor() {
   }, []);
 
   React.useEffect(() => {
+    if (draftId && window.clickStudio?.loadDraft) {
+      (async () => {
+        try {
+          const draft = await window.clickStudio!.loadDraft(draftId);
+          const d = (draft?.data ?? {}) as Partial<{
+            videoPath: string;
+            videoUrl: string;
+            cameraVideoPath: string | null;
+            cameraVideoUrl: string | null;
+            clickEventsSource: ClickEventWithZoom[];
+            segments: CapcutSegment[];
+            audioTracks: AudioTrack[];
+            selectedBackground: number;
+            padding: number;
+            zoomMode: ZoomMode;
+            zoomDuration: number;
+            showMenu: boolean;
+            cameraOverlayEnabled: boolean;
+            cameraOverlayShape: "rect" | "circle";
+            cameraOverlaySizePct: number;
+          }>;
+
+          draftCreatedAtRef.current = draft.createdAt ?? null;
+          setProjectTitle(draft.title ?? "Untitled draft");
+          if (d.videoPath) {
+            setVideoUrl(toFileUrl(d.videoPath));
+          } else if (d.videoUrl) {
+            setVideoUrl(d.videoUrl);
+          }
+          setVideoLoadError(null);
+          if (d.cameraVideoPath) {
+            setCameraVideoUrl(toFileUrl(d.cameraVideoPath));
+          } else if (d.cameraVideoUrl) {
+            setCameraVideoUrl(d.cameraVideoUrl);
+          }
+          if (Array.isArray(d.clickEventsSource)) setClickEventsSource(d.clickEventsSource);
+          if (Array.isArray(d.segments) && d.segments.length) setSegments(d.segments);
+          if (Array.isArray(d.audioTracks)) setAudioTracks(d.audioTracks);
+          if (typeof d.selectedBackground === "number") setSelectedBackground(d.selectedBackground);
+          if (typeof d.padding === "number") setPadding(d.padding);
+          if (d.zoomMode) setZoomMode(d.zoomMode);
+          if (typeof d.zoomDuration === "number") setZoomDuration(d.zoomDuration);
+          if (typeof d.showMenu === "boolean") setShowMenu(d.showMenu);
+          if (typeof d.cameraOverlayEnabled === "boolean") setCameraOverlayEnabled(d.cameraOverlayEnabled);
+          if (d.cameraOverlayShape) setCameraOverlayShape(d.cameraOverlayShape);
+          if (typeof d.cameraOverlaySizePct === "number") setCameraOverlaySizePct(d.cameraOverlaySizePct);
+        } catch (e) {
+          console.error("[draft] load failed", e);
+          toast.error("Failed to load draft");
+        }
+      })();
+      return;
+    }
+
     if (id === "new") {
       const recordingVideoUrl = screenRecordingService.getRecordingVideoUrl();
       if (recordingVideoUrl) {
         setVideoUrl(recordingVideoUrl);
-        setClickEventsSource(screenRecordingService.getClickEvents());
+        setVideoLoadError(null);
+        setClickEventsSource(screenRecordingService.getClickEvents() as ClickEventWithZoom[]);
         setCameraVideoUrl(screenRecordingService.getRecordingCameraVideoUrl());
       } else {
         toast.error("No recording found. Please record a video first.");
@@ -128,7 +233,139 @@ export default function CapcutEditor() {
     if (id) {
       setVideoUrl(`/videos/${id}`);
     }
-  }, [id]);
+  }, [id, draftId]);
+
+  const handleLocateVideo = React.useCallback(async () => {
+    if (!draftId) return;
+    if (!window.clickStudio?.pickVideoFile) {
+      toast.error("File picker not available");
+      return;
+    }
+    setIsPickingVideo(true);
+    try {
+      const res = await window.clickStudio.pickVideoFile();
+      if (!res || res.canceled) return;
+
+      const pickedPath = res.path;
+      const nextUrl = toFileUrl(pickedPath);
+      setVideoUrl(nextUrl);
+      setVideoLoadError(null);
+
+      // Persist so the draft never breaks again.
+      await window.clickStudio.saveDraft({
+        id: draftId,
+        title: projectTitle,
+        createdAt: draftCreatedAtRef.current ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        data: {
+          videoPath: pickedPath,
+          videoUrl: undefined,
+          cameraVideoPath: null,
+          cameraVideoUrl: undefined,
+          clickEventsSource,
+          segments,
+          audioTracks,
+          selectedBackground,
+          padding,
+          zoomMode,
+          zoomDuration,
+          showMenu,
+          cameraOverlayEnabled,
+          cameraOverlayShape,
+          cameraOverlaySizePct,
+        },
+      });
+      toast.success("Video linked to draft");
+    } catch (e) {
+      console.error("[draft] locate video failed", e);
+      toast.error("Failed to locate video");
+    } finally {
+      setIsPickingVideo(false);
+    }
+  }, [
+    cameraOverlayEnabled,
+    cameraOverlayShape,
+    cameraOverlaySizePct,
+    audioTracks,
+    clickEventsSource,
+    draftId,
+    padding,
+    projectTitle,
+    segments,
+    selectedBackground,
+    showMenu,
+    zoomDuration,
+    zoomMode,
+  ]);
+
+  React.useEffect(() => {
+    if (!draftId) return;
+    if (!window.clickStudio?.saveDraft) return;
+
+    const t = setTimeout(() => {
+      const baseVideoPath =
+        typeof screenRecordingService.getCurrentRecordingPath === "function"
+          ? screenRecordingService.getCurrentRecordingPath()
+          : null;
+
+      window.clickStudio!
+        .saveDraft({
+          id: draftId,
+          title: projectTitle,
+          createdAt: draftCreatedAtRef.current ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          data: {
+            // Prefer an explicit file path if we have one; otherwise preserve current URL (best effort).
+            videoPath: typeof videoUrl === "string" && videoUrl.startsWith("clickstudio://")
+              ? decodeURIComponent(videoUrl.replace(/^clickstudio:\/\//, ""))
+              : baseVideoPath,
+            videoUrl:
+              typeof videoUrl === "string" && !videoUrl.startsWith("clickstudio://")
+                ? videoUrl
+                : undefined,
+            cameraVideoPath:
+              typeof cameraVideoUrl === "string" && cameraVideoUrl.startsWith("clickstudio://")
+                ? decodeURIComponent(cameraVideoUrl.replace(/^clickstudio:\/\//, ""))
+                : null,
+            cameraVideoUrl:
+              typeof cameraVideoUrl === "string" && !cameraVideoUrl.startsWith("clickstudio://")
+                ? cameraVideoUrl
+                : undefined,
+            clickEventsSource,
+            segments,
+            audioTracks,
+            selectedBackground,
+            padding,
+            zoomMode,
+            zoomDuration,
+            showMenu,
+            cameraOverlayEnabled,
+            cameraOverlayShape,
+            cameraOverlaySizePct,
+          },
+        })
+        .catch((e) => {
+          console.warn("[draft] autosave failed", e);
+        });
+    }, 600);
+
+    return () => clearTimeout(t);
+  }, [
+    draftId,
+    projectTitle,
+    videoUrl,
+    cameraVideoUrl,
+    clickEventsSource,
+    segments,
+    selectedBackground,
+    padding,
+    zoomMode,
+    zoomDuration,
+    showMenu,
+    cameraOverlayEnabled,
+    cameraOverlayShape,
+    cameraOverlaySizePct,
+  ]);
 
   React.useEffect(() => {
     if (!cameraVideoUrl) return;
@@ -178,6 +415,42 @@ export default function CapcutEditor() {
     setOutputTime(0);
   }, [videoDuration]);
 
+  // Initialize a default audio lane (placeholder visuals) aligned to output duration.
+  React.useEffect(() => {
+    if (!outputDuration || outputDuration <= 0) return;
+    setAudioTracks((prev) => {
+      if (prev.length) {
+        // Keep existing tracks but ensure their first clip covers the output by default.
+        return prev.map((t) => {
+          const first = t.clips[0];
+          if (!first) {
+            return {
+              ...t,
+              clips: [{ id: `${t.id}_clip0`, tOutStart: 0, duration: outputDuration }],
+            };
+          }
+          const nextDur = Math.max(0, outputDuration - Math.max(0, first.tOutStart));
+          if (Math.abs(first.duration - nextDur) < 0.001 && first.tOutStart === 0) return t;
+          return {
+            ...t,
+            clips: [{ ...first, tOutStart: 0, duration: nextDur }, ...t.clips.slice(1)],
+          };
+        });
+      }
+
+      return [
+        {
+          id: "audio_0",
+          name: "Audio",
+          muted: false,
+          solo: false,
+          volume: 1,
+          clips: [{ id: "audio_0_clip0", tOutStart: 0, duration: outputDuration }],
+        },
+      ];
+    });
+  }, [outputDuration]);
+
   // Remap recorded click events onto the stitched timeline order.
   React.useEffect(() => {
     const EPS = 0.0005;
@@ -203,6 +476,9 @@ export default function CapcutEditor() {
           tOut: cumOut + (tSrc - seg.srcStart),
           xNorm: c.xNorm,
           yNorm: c.yNorm,
+          enabled: c.enabled,
+          zoomModeOverride: c.zoomModeOverride,
+          zoomDurationOverride: c.zoomDurationOverride,
         });
       }
 
@@ -212,6 +488,42 @@ export default function CapcutEditor() {
     remapped.sort((a, b) => a.tOut - b.tOut);
     setClickEventsStitched(remapped);
   }, [segments, clickEventsSource]);
+
+  const selectedClick = React.useMemo(() => {
+    if (!selectedClickMarkerId) return null;
+    return clickEventsStitched.find((c) => c.id === selectedClickMarkerId) ?? null;
+  }, [clickEventsStitched, selectedClickMarkerId]);
+
+  const updateSourceClick = React.useCallback(
+    (sourceIndex: number, patch: Partial<ClickEventWithZoom>) => {
+      setClickEventsSource((prev) =>
+        prev.map((c, idx) => (idx === sourceIndex ? { ...c, ...patch } : c))
+      );
+    },
+    []
+  );
+
+  const deleteSourceClick = React.useCallback((sourceIndex: number) => {
+    setClickEventsSource((prev) => prev.filter((_, idx) => idx !== sourceIndex));
+    setSelectedClickMarkerId(null);
+  }, []);
+
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!selectedClick) return;
+      if (e.key === "Escape") {
+        setSelectedClickMarkerId(null);
+        return;
+      }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        e.preventDefault();
+        deleteSourceClick(selectedClick.sourceIndex);
+        toast.success("Deleted zoom point");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [deleteSourceClick, selectedClick]);
 
   const getSourceTimeFromOutputTime = React.useCallback(
     (tOut: number) => {
@@ -325,7 +637,10 @@ export default function CapcutEditor() {
     // Scan from the end to implement "last click wins".
     for (let i = clickEventsStitched.length - 1; i >= 0; i--) {
       const e = clickEventsStitched[i];
-      if (outputTime >= e.tOut && outputTime <= e.tOut + zoomDuration) {
+      if (e.enabled === false) continue;
+      const dur = typeof e.zoomDurationOverride === "number" ? e.zoomDurationOverride : zoomDuration;
+      if (dur <= 0) continue;
+      if (outputTime >= e.tOut && outputTime <= e.tOut + dur) {
         return e;
       }
     }
@@ -338,11 +653,20 @@ export default function CapcutEditor() {
     let translateX = 0;
     let translateY = 0;
 
-    if (
-      zoomMode === "off" ||
-      !activeZoomClick ||
-      zoomDuration <= 0
-    ) {
+    const easeInOutCubic = (t: number) =>
+      t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+    if (zoomMode === "off" || !activeZoomClick) {
+      return { totalScale, translateX, translateY };
+    }
+
+    const effectiveZoomMode = activeZoomClick.zoomModeOverride ?? zoomMode;
+    const effectiveZoomDuration =
+      typeof activeZoomClick.zoomDurationOverride === "number"
+        ? activeZoomClick.zoomDurationOverride
+        : zoomDuration;
+
+    if (effectiveZoomMode === "off" || effectiveZoomDuration <= 0) {
       return { totalScale, translateX, translateY };
     }
 
@@ -353,20 +677,28 @@ export default function CapcutEditor() {
     };
 
     const progress = clamp(
-      (outputTime - activeZoomClick.tOut) / zoomDuration,
+      (outputTime - activeZoomClick.tOut) / effectiveZoomDuration,
       0,
       1
     );
 
-    // EaseInOutCubic
-    const eased =
-      progress < 0.5
-        ? 4 * progress * progress * progress
-        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+    // Animate pan separately (avoid jump at scale=1):
+    // pan in → zoom in/out → pan back.
+    const panLead = 0.18;
+    const panTail = 0.18;
+    const zoomWindow = Math.max(0.001, 1 - panLead - panTail);
+
+    const panIn = easeInOutCubic(clamp(progress / panLead, 0, 1));
+    const panOut = easeInOutCubic(clamp((1 - progress) / panTail, 0, 1));
+    const panFactor = progress < panLead ? panIn : progress > 1 - panTail ? panOut : 1;
+
+    const zoomT = clamp((progress - panLead) / zoomWindow, 0, 1);
+    const zoomPhase = zoomT <= 0.5 ? zoomT * 2 : (1 - zoomT) * 2; // 0→1→0
+    const zoomEased = easeInOutCubic(zoomPhase);
 
     const zoomMultiplier =
       1 +
-      (maxScaleByMode[zoomMode as Exclude<ZoomMode, "off">] - 1) * eased;
+      (maxScaleByMode[effectiveZoomMode as Exclude<ZoomMode, "off">] - 1) * zoomEased;
 
     totalScale = baseScale * zoomMultiplier;
 
@@ -375,8 +707,10 @@ export default function CapcutEditor() {
     const w = videoContainerRef.current?.clientWidth ?? 0;
     const h = videoContainerRef.current?.clientHeight ?? 0;
     if (w > 0 && h > 0) {
-      translateX = (0.5 - totalScale * activeZoomClick.xNorm) * w;
-      translateY = (0.5 - totalScale * activeZoomClick.yNorm) * h;
+      const targetX = (0.5 - totalScale * activeZoomClick.xNorm) * w;
+      const targetY = (0.5 - totalScale * activeZoomClick.yNorm) * h;
+      translateX = targetX * panFactor;
+      translateY = targetY * panFactor;
     }
 
     return { totalScale, translateX, translateY };
@@ -391,11 +725,23 @@ export default function CapcutEditor() {
     toast.success("Deleted click zoom section");
   };
 
+  const handleMoveClickMarker = React.useCallback(
+    (id: string, nextTOut: number) => {
+      const match = id.match(/^click_(\d+)$/);
+      if (!match) return;
+      const sourceIndex = Number(match[1]);
+      if (!Number.isFinite(sourceIndex)) return;
+      const nextSrc = getSourceTimeFromOutputTime(nextTOut);
+      updateSourceClick(sourceIndex, { t: nextSrc });
+    },
+    [getSourceTimeFromOutputTime, updateSourceClick]
+  );
+
   React.useEffect(() => {
     if (!videoRef.current) return;
     const v = videoRef.current;
 
-    v.ontimeupdate = () => {
+    const handleTimeTick = () => {
       if (!segments.length) return;
       if (isSeekingRef.current) return;
 
@@ -463,6 +809,33 @@ export default function CapcutEditor() {
         });
       }
     };
+    v.ontimeupdate = handleTimeTick;
+
+    // Prefer requestVideoFrameCallback when available for smoother, frame-accurate updates.
+    const anyV = v as unknown as {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+      cancelVideoFrameCallback?: (id: number) => void;
+    };
+    let rvfcId: number | null = null;
+    const startRvfc = () => {
+      if (!anyV.requestVideoFrameCallback) return;
+      if (rvfcId != null) return;
+      const onFrame = () => {
+        rvfcId = null;
+        if (v.paused || v.ended) return;
+        handleTimeTick();
+        rvfcId = anyV.requestVideoFrameCallback!(onFrame);
+      };
+      rvfcId = anyV.requestVideoFrameCallback(onFrame);
+    };
+    const stopRvfc = () => {
+      if (rvfcId == null) return;
+      anyV.cancelVideoFrameCallback?.(rvfcId);
+      rvfcId = null;
+    };
+    v.onplay = () => startRvfc();
+    v.onpause = () => stopRvfc();
+    if (!v.paused) startRvfc();
 
     v.onended = () => {
       // If the active segment ends at the end of the *source* video, the browser can fire `ended`
@@ -494,7 +867,10 @@ export default function CapcutEditor() {
 
     return () => {
       v.ontimeupdate = null;
+      v.onplay = null;
+      v.onpause = null;
       v.onended = null;
+      stopRvfc();
     };
   }, [
     segments,
@@ -711,7 +1087,7 @@ export default function CapcutEditor() {
               >
                 <div
                   ref={zoomFrameRef}
-                  className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black transition-transform duration-75 ease-out will-change-transform`}
+                  className={`absolute aspect-auto ${videoRef.current?.videoWidth > 300 ? "rounded-2xl" : "rounded-xl"} border-gray-600 border-2 overflow-hidden bg-black shadow-lg shadow-black will-change-transform`}
                   style={{
                     width: `${videoRef.current?.videoWidth > 500 ? "90%" : "300px"}`,
                     transformOrigin: "0 0",
@@ -731,6 +1107,17 @@ export default function CapcutEditor() {
                       <video
                         ref={videoRef}
                         src={videoUrl}
+                        onError={() => {
+                          if (videoUrl?.startsWith("file://")) {
+                            const absPath = decodeURIComponent(videoUrl.replace(/^file:\/\//, ""));
+                            const fallback = toClickstudioUrl(absPath);
+                            setVideoUrl(fallback);
+                            return;
+                          }
+                          const msg = videoUrl ? guessMissingVideoMessage(videoUrl) : "Failed to load video";
+                          setVideoLoadError(msg);
+                          toast.error(`${msg}${videoUrl ? `: ${videoUrl}` : ""}`);
+                        }}
                         className="w-full h-full object-contain transition-transform duration-300"
                         controls={false}
                       />
@@ -739,6 +1126,25 @@ export default function CapcutEditor() {
                         <Play className="h-16 w-16 text-white/50" />
                       </div>
                     )}
+                    {videoLoadError ? (
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="glass-card rounded-lg px-4 py-3 text-xs text-white/80 border border-white/15 max-w-[520px]">
+                          {videoLoadError}
+                          {draftId && window.clickStudio?.pickVideoFile ? (
+                            <div className="mt-3 flex justify-end">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={isPickingVideo}
+                                onClick={handleLocateVideo}
+                              >
+                                {isPickingVideo ? "Opening…" : "Locate video file…"}
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
 
                   {cameraVideoUrl && cameraOverlayEnabled ? (
@@ -766,8 +1172,11 @@ export default function CapcutEditor() {
                 <div className="absolute inset-0 pointer-events-none">
                   {activeZoomClick ? (
                     <>
-                      {/* Center dot: during zoom we pan+scale to the click point, so it lands center. */}
-                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-studio-accent shadow" />
+                      {/* During zoom we pan+scale to the click point, so it lands center. */}
+                      <MousePointer2
+                        className="absolute top-1/2 left-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]"
+                        aria-hidden="true"
+                      />
 
                       <div className="absolute top-3 left-3 pointer-events-auto">
                         <div className="glass-card px-3 py-2 rounded-lg text-xs">
@@ -806,6 +1215,29 @@ export default function CapcutEditor() {
               setZoomMode={setZoomMode}
               zoomDuration={zoomDuration}
               setZoomDuration={setZoomDuration}
+              selectedZoomPoint={
+                selectedClick
+                  ? {
+                      id: selectedClick.id,
+                      tOut: selectedClick.tOut,
+                      xNorm: selectedClick.xNorm,
+                      yNorm: selectedClick.yNorm,
+                      enabled: selectedClick.enabled !== false,
+                      zoomModeOverride: selectedClick.zoomModeOverride,
+                      zoomDurationOverride: selectedClick.zoomDurationOverride,
+                      sourceIndex: selectedClick.sourceIndex,
+                    }
+                  : null
+              }
+              onUpdateSelectedZoomPoint={(patch) => {
+                if (!selectedClick) return;
+                updateSourceClick(selectedClick.sourceIndex, patch);
+              }}
+              onDeleteSelectedZoomPoint={() => {
+                if (!selectedClick) return;
+                deleteSourceClick(selectedClick.sourceIndex);
+                toast.success("Deleted zoom point");
+              }}
               handleExport={handleExport}
               isExporting={isExporting}
               exportProgress={exportProgress}
@@ -832,7 +1264,35 @@ export default function CapcutEditor() {
               onSplitAt={handleSplitAt}
               onDeleteSegment={handleDeleteSegment}
               onReorderSegment={handleReorderSegment}
+              onTrimSegment={(segmentId, patch) => {
+                setSegments((prev) =>
+                  prev.map((s) => {
+                    if (s.id !== segmentId) return s;
+                    const minDur = 0.05;
+                    const nextStart =
+                      typeof patch.srcStart === "number" ? patch.srcStart : s.srcStart;
+                    const nextEnd =
+                      typeof patch.srcEnd === "number" ? patch.srcEnd : s.srcEnd;
+                    const clampedStart = clamp(nextStart, 0, Math.max(0, videoDuration - minDur));
+                    const clampedEnd = clamp(nextEnd, clampedStart + minDur, Math.max(clampedStart + minDur, videoDuration));
+                    return { ...s, srcStart: clampedStart, srcEnd: clampedEnd };
+                  })
+                );
+              }}
               clickMarkers={clickMarkers}
+              selectedClickMarkerId={selectedClickMarkerId}
+              onSelectClickMarker={(id) => setSelectedClickMarkerId(id)}
+              onMoveClickMarker={handleMoveClickMarker}
+              audioTracks={audioTracks}
+              onUpdateAudioTrack={(trackId, patch) => {
+                setAudioTracks((prev) =>
+                  prev.map((t) => (t.id === trackId ? { ...t, ...patch } : t))
+                );
+              }}
+              pxPerSecond={timelinePxPerSecond}
+              scrollSec={timelineScrollSec}
+              onScrollSecChange={setTimelineScrollSec}
+              onPxPerSecondChange={setTimelinePxPerSecond}
             />
           </div>
         </div>

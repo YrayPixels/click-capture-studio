@@ -359,9 +359,39 @@ export default function Recording() {
     try {
       const fileName = await screenRecordingService.stopRecording();
       toast.success(`Recording saved: ${fileName}`);
-      // In Electron we keep the recorded blob URL in-memory and open the live editor.
-      // (Loading by filename/path is a separate persistence feature.)
-      navigate(`/editor/new`);
+      // Create a draft so incomplete edits are recoverable from Home.
+      const draftId = `d_${Date.now()}`;
+      if (window.clickStudio?.saveDraft) {
+        try {
+          const videoPath = screenRecordingService.getCurrentRecordingPath();
+          await window.clickStudio.saveDraft({
+            id: draftId,
+            title: "Untitled draft",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            data: {
+              videoPath,
+              videoUrl: screenRecordingService.getRecordingVideoUrl(),
+              cameraVideoPath: null,
+              cameraVideoUrl: screenRecordingService.getRecordingCameraVideoUrl(),
+              clickEventsSource: screenRecordingService.getClickEvents(),
+              segments: [],
+              selectedBackground: 0,
+              padding: 100,
+              zoomMode: "medium",
+              zoomDuration: 1.0,
+              showMenu: true,
+              cameraOverlayEnabled: true,
+              cameraOverlayShape: "rect",
+              cameraOverlaySizePct: 22,
+            },
+          });
+        } catch (e) {
+          console.warn("[draft] initial save failed", e);
+        }
+      }
+
+      navigate(`/editor/draft_${draftId}`);
     } catch (error) {
       const err = error as { name?: string; message?: string };
       console.error("Error saving recording:", error);

@@ -14,6 +14,10 @@ const api = {
       data
     });
   },
+  listDrafts: () => electron.ipcRenderer.invoke("drafts:list"),
+  loadDraft: (id) => electron.ipcRenderer.invoke("drafts:load", { id }),
+  saveDraft: (draft) => electron.ipcRenderer.invoke("drafts:save", draft),
+  pickVideoFile: () => electron.ipcRenderer.invoke("system:pickVideoFile"),
   openScreenRecordingPreferences: () => electron.ipcRenderer.invoke("system:openScreenRecordingPreferences"),
   openAccessibilityPreferences: () => electron.ipcRenderer.invoke("system:openAccessibilityPreferences"),
   openInputMonitoringPreferences: () => electron.ipcRenderer.invoke("system:openInputMonitoringPreferences"),

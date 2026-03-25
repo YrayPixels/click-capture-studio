@@ -1,8 +1,33 @@
-import { app, BrowserWindow, screen, ipcMain, session, desktopCapturer, shell, dialog } from "electron";
+import {
+  app,
+  BrowserWindow,
+  screen,
+  ipcMain,
+  session,
+  desktopCapturer,
+  shell,
+  protocol,
+  dialog,
+} from "electron";
 import path from "path";
 import { performance } from "node:perf_hooks";
 import { uIOhook } from "uiohook-napi";
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
+
+// Make `clickstudio://` behave like a standard secure scheme so <video> can load it.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "clickstudio",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
 
 type ClickEvent = {
   t: number;
@@ -17,6 +42,47 @@ let clickStartPerfNow: number | null = null;
 let clickCaptureRunning = false;
 let clickListenerRegistered = false;
 let lastClickCaptureError: { message: string } | null = null;
+
+type DraftPayload = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  data: unknown;
+};
+
+function getDraftsDir() {
+  const docs = app.getPath("documents");
+  return path.join(docs, "click-studio", "drafts");
+}
+
+function getRecordingsDir() {
+  const docs = app.getPath("documents");
+  return path.join(docs, "click-studio", "recordings");
+}
+
+function getVideosDir() {
+  const docs = app.getPath("documents");
+  return path.join(docs, "click-studio", "videos");
+}
+
+async function ensureDraftsDir() {
+  const dir = getDraftsDir();
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function ensureRecordingsDir() {
+  const dir = getRecordingsDir();
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function ensureVideosDir() {
+  const dir = getVideosDir();
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
 
 // Enable screen-capture APIs in Electron renderer (especially on http://localhost dev origins).
 app.commandLine.appendSwitch("enable-usermedia-screen-capturing");
@@ -121,6 +187,101 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // Allow the renderer to load local media files via a safe custom protocol.
+  protocol.registerStreamProtocol("clickstudio", async (request, callback) => {
+    try {
+      const u = new URL(request.url);
+      // `clickstudio:///Users/...` => pathname "/Users/..."
+      // `clickstudio://Users/...`  => hostname "Users", pathname "/..." (missing leading segment)
+      const rawPath = decodeURIComponent(u.pathname);
+      const host = decodeURIComponent(u.hostname || "");
+      const reconstructedHostPath =
+        host && rawPath.startsWith("/") ? `/${host}${rawPath}` : null;
+      const primaryPath = reconstructedHostPath ?? rawPath;
+
+      const resolveCandidatePath = async () => {
+        const candidates: string[] = [];
+
+        // Most requests come in as absolute paths (e.g. /Users/...).
+        candidates.push(primaryPath);
+
+        // Some older drafts saved just a filename, which becomes `clickstudio:///recording-....webm`
+        // and arrives here as `/recording-....webm`. Resolve those into our known Documents dirs.
+        const looksLikeBareFilename =
+          primaryPath.startsWith("/") &&
+          !primaryPath.startsWith("/Users/") &&
+          primaryPath.split("/").length === 2;
+        if (looksLikeBareFilename) {
+          const base = primaryPath.replace(/^\/+/, "");
+          candidates.push(path.join(getVideosDir(), base));
+          candidates.push(path.join(getRecordingsDir(), base));
+        }
+
+        for (const c of candidates) {
+          try {
+            const st = await fs.stat(c);
+            return { path: c, size: st.size };
+          } catch {
+            // try next
+          }
+        }
+        throw new Error(`clickstudio file not found: ${primaryPath}`);
+      };
+
+      const { path: filePath, size } = await resolveCandidatePath();
+
+      const headers: Record<string, string> = {
+        // Most of our captures are webm.
+        "Content-Type": filePath.toLowerCase().endsWith(".webm") ? "video/webm" : "application/octet-stream",
+        "Accept-Ranges": "bytes",
+      };
+
+      const rangeHeader =
+        (request.headers?.Range as string | undefined) ??
+        (request.headers?.range as string | undefined);
+
+      if (rangeHeader) {
+        // Example: "bytes=0-1023"
+        const m = /^bytes=(\d+)-(\d*)$/i.exec(rangeHeader.trim());
+        if (!m) {
+          callback({ statusCode: 416, headers });
+          return;
+        }
+
+        const start = Number(m[1]);
+        const end = m[2] ? Number(m[2]) : size - 1;
+
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) {
+          callback({ statusCode: 416, headers });
+          return;
+        }
+
+        const safeEnd = Math.min(end, size - 1);
+        const chunkSize = safeEnd - start + 1;
+
+        headers["Content-Range"] = `bytes ${start}-${safeEnd}/${size}`;
+        headers["Content-Length"] = String(chunkSize);
+
+        callback({
+          statusCode: 206,
+          headers,
+          data: createReadStream(filePath, { start, end: safeEnd }),
+        });
+        return;
+      }
+
+      headers["Content-Length"] = String(size);
+      callback({
+        statusCode: 200,
+        headers,
+        data: createReadStream(filePath),
+      });
+    } catch (e) {
+      console.error("[protocol] clickstudio failed", e);
+      callback({ statusCode: 404 });
+    }
+  });
+
   // Broader permission handling than just request prompts. Electron can deny access
   // at multiple stages (check/request/device), and dev origins can be treated as insecure.
   session.defaultSession.setPermissionCheckHandler((_wc, permission, _origin, _details) => {
@@ -214,6 +375,21 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle("system:pickVideoFile", async () => {
+    const res = await dialog.showOpenDialog({
+      title: "Select a video file",
+      properties: ["openFile"],
+      filters: [
+        { name: "Video", extensions: ["webm", "mp4", "mov"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    if (res.canceled) return { canceled: true as const };
+    const filePath = res.filePaths?.[0];
+    if (!filePath) return { canceled: true as const };
+    return { canceled: false as const, path: filePath };
+  });
+
   ipcMain.handle("clicks:start", () => {
     return startGlobalClickCapture();
   });
@@ -230,16 +406,71 @@ app.whenReady().then(async () => {
   ipcMain.handle(
     "recording:save",
     async (_event, payload: { suggestedName: string; data: Uint8Array }) => {
-      const { canceled, filePath } = await dialog.showSaveDialog({
-        defaultPath: payload.suggestedName,
-        filters: [{ name: "WebM Video", extensions: ["webm"] }],
-      });
-      if (canceled || !filePath) return { ok: false as const, canceled: true as const };
-
-      await fs.writeFile(filePath, payload.data);
-      return { ok: true as const, path: filePath };
+      try {
+        const dir = await ensureVideosDir();
+        const safeName = payload.suggestedName.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const filePath = path.join(dir, safeName);
+        await fs.writeFile(filePath, payload.data);
+        console.info("[recording] saved", { filePath, bytes: payload.data?.byteLength ?? 0 });
+        return { ok: true as const, path: filePath };
+      } catch (e) {
+        const msg = (e as { message?: string } | null)?.message || "Failed to save recording";
+        console.error("[recording] save failed", e);
+        return { ok: false as const, error: { message: msg } };
+      }
     }
   );
+
+  ipcMain.handle("drafts:list", async () => {
+    const dir = await ensureDraftsDir();
+    const entries = await fs.readdir(dir).catch(() => []);
+    const drafts: Array<{ id: string; title: string; updatedAt: string; createdAt?: string }> = [];
+
+    for (const name of entries) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(dir, name);
+      try {
+        const raw = await fs.readFile(file, "utf8");
+        const parsed = JSON.parse(raw) as Partial<DraftPayload>;
+        const id = String(parsed.id ?? name.replace(/\.json$/i, ""));
+        const title = String(parsed.title ?? "Untitled draft");
+        const updatedAt = String(parsed.updatedAt ?? parsed.createdAt ?? new Date(0).toISOString());
+        const createdAt = parsed.createdAt ? String(parsed.createdAt) : undefined;
+        drafts.push({ id, title, updatedAt, createdAt });
+      } catch {
+        // ignore unreadable draft
+      }
+    }
+
+    drafts.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+    return drafts;
+  });
+
+  ipcMain.handle("drafts:load", async (_event, payload: { id: string }) => {
+    const dir = await ensureDraftsDir();
+    const safeId = payload.id.replace(/[^a-zA-Z0-9_-]/g, "");
+    const file = path.join(dir, `${safeId}.json`);
+    const raw = await fs.readFile(file, "utf8");
+    const parsed = JSON.parse(raw) as DraftPayload;
+    return parsed;
+  });
+
+  ipcMain.handle("drafts:save", async (_event, payload: DraftPayload) => {
+    const dir = await ensureDraftsDir();
+    const safeId = payload.id.replace(/[^a-zA-Z0-9_-]/g, "");
+    const file = path.join(dir, `${safeId}.json`);
+
+    const next: DraftPayload = {
+      id: safeId,
+      title: String(payload.title ?? "Untitled draft"),
+      createdAt: String(payload.createdAt ?? new Date().toISOString()),
+      updatedAt: String(payload.updatedAt ?? new Date().toISOString()),
+      data: payload.data ?? null,
+    };
+
+    await fs.writeFile(file, JSON.stringify(next, null, 2), "utf8");
+    return { ok: true as const, id: safeId };
+  });
 
   await createWindow();
 

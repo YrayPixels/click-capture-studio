@@ -20,6 +20,25 @@ export type SaveRecordingResult =
   | { ok: true; path: string }
   | { ok: false; canceled?: true; error?: { message: string } };
 
+export type DraftSummary = {
+  id: string;
+  title: string;
+  updatedAt: string;
+  createdAt?: string;
+};
+
+export type DraftFile = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  data: unknown;
+};
+
+export type PickVideoFileResult =
+  | { canceled: true }
+  | { canceled: false; path: string };
+
 const api = {
   startGlobalClickCapture: () =>
     ipcRenderer.invoke("clicks:start") as Promise<StartClickCaptureResult>,
@@ -38,6 +57,12 @@ const api = {
       data,
     })) as SaveRecordingResult;
   },
+  listDrafts: () => ipcRenderer.invoke("drafts:list") as Promise<DraftSummary[]>,
+  loadDraft: (id: string) => ipcRenderer.invoke("drafts:load", { id }) as Promise<DraftFile>,
+  saveDraft: (draft: DraftFile) =>
+    ipcRenderer.invoke("drafts:save", draft) as Promise<{ ok: true; id: string }>,
+  pickVideoFile: () =>
+    ipcRenderer.invoke("system:pickVideoFile") as Promise<PickVideoFileResult>,
   openScreenRecordingPreferences: () =>
     ipcRenderer.invoke("system:openScreenRecordingPreferences") as Promise<boolean>,
   openAccessibilityPreferences: () =>

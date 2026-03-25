@@ -446,16 +446,13 @@ export class ScreenRecordingService {
                 this.currentRecordingPath = res.path;
                 resolve(res.path);
               } else {
-                // User canceled: keep the in-memory URL usable in the editor.
-                this.currentRecordingPath = fileName;
-                resolve(fileName);
+                // Electron autosave should not silently fail.
+                const msg = res.error?.message || "Failed to save recording";
+                throw new Error(msg);
               }
             } catch (e) {
               console.error("[recording] Electron saveRecording failed", e);
-              // Fall back to download approach.
-              this.downloadFile(this.recordedBlob, fileName);
-              this.currentRecordingPath = fileName;
-              resolve(fileName);
+              reject(e);
             }
           } else if (window.showSaveFilePicker) {
             // Browser File System Access API.
