@@ -30,10 +30,37 @@ type RecordingPrefs = {
   micAudio: boolean;
   countdownSeconds: 0 | 3 | 5;
   frameRate: 30 | 60;
+  cameraDeviceId?: string;
+  micDeviceId?: string;
 };
 
 const PREFS_KEY = "click-studio-recording-prefs";
 const SELECTED_SOURCE_KEY = "click-studio-selected-desktop-source";
+const LAST_SOURCE_PICK_KEY = "click-studio-last-desktop-source-pick";
+
+function readLastDesktopPick(): DesktopSourcePick | null {
+  try {
+    const raw = localStorage.getItem(LAST_SOURCE_PICK_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DesktopSourcePick>;
+    if (!parsed?.id || !parsed?.name) return null;
+    return {
+      id: String(parsed.id),
+      name: String(parsed.name),
+      thumbnailDataUrl: String(parsed.thumbnailDataUrl ?? ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeLastDesktopPick(pick: DesktopSourcePick) {
+  try {
+    localStorage.setItem(LAST_SOURCE_PICK_KEY, JSON.stringify(pick));
+  } catch {
+    // ignore
+  }
+}
 
 export function RecordingModal({
   isOpen,
@@ -48,6 +75,10 @@ export function RecordingModal({
     null
   );
   const [isPickingSource, setIsPickingSource] = React.useState(false);
+  const [selectedDesktopSource, setSelectedDesktopSource] =
+    React.useState<DesktopSourcePick | null>(() => readLastDesktopPick());
+  const isElectronRuntime =
+    typeof navigator !== "undefined" && navigator.userAgent?.includes("Electron");
 
   const [prefs, setPrefs] = React.useState<RecordingPrefs>(() => {
     try {
@@ -68,6 +99,8 @@ export function RecordingModal({
         micAudio: parsed.micAudio ?? true,
         countdownSeconds: parsed.countdownSeconds ?? 3,
         frameRate: parsed.frameRate ?? 60,
+        cameraDeviceId: parsed.cameraDeviceId,
+        micDeviceId: parsed.micDeviceId,
       };
     } catch {
       return {
@@ -76,9 +109,16 @@ export function RecordingModal({
         micAudio: true,
         countdownSeconds: 3,
         frameRate: 60,
+        cameraDeviceId: undefined,
+        micDeviceId: undefined,
       };
     }
   });
+
+  const needsDesktopSource = prefs.mode === "screen" || prefs.mode === "both";
+  const canPickDesktopSource = Boolean(window.clickStudio?.getDesktopSources);
+  const mustPickInApp = isElectronRuntime && needsDesktopSource;
+  const startDisabled = mustPickInApp && !canPickDesktopSource;
 
   React.useEffect(() => {
     try {
@@ -106,7 +146,9 @@ export function RecordingModal({
         setCameraPreviewError(null);
         // Keep preview lightweight (no audio) and avoid locking mic permissions.
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: prefs.cameraDeviceId
+            ? ({ deviceId: { exact: prefs.cameraDeviceId } } as MediaTrackConstraints)
+            : true,
           audio: false,
         });
         if (cancelled) {
@@ -126,7 +168,7 @@ export function RecordingModal({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, prefs.mode]);
+  }, [isOpen, prefs.mode, prefs.cameraDeviceId]);
 
   React.useEffect(() => {
     if (!cameraPreviewRef.current) return;
@@ -138,13 +180,32 @@ export function RecordingModal({
     });
   }, [cameraPreviewStream]);
 
-  const startRecording = async () => {
-    const needsDesktopSource = prefs.mode === "screen" || prefs.mode === "both";
-    const canPick = Boolean(window.clickStudio?.getDesktopSources);
+  // Clear any stale desktop selection when switching away from screen capture modes.
+  React.useEffect(() => {
+    if (prefs.mode === "screen" || prefs.mode === "both") return;
+    setSelectedDesktopSource(null);
+  }, [prefs.mode]);
 
-    if (needsDesktopSource && canPick) {
+  const startRecording = async () => {
+    const canPick = canPickDesktopSource;
+
+    if (mustPickInApp && !canPick) {
+      // Preload isn't available; avoid starting a capture that will auto-select or fail.
+      return;
+    }
+
+    if (needsDesktopSource && canPick && !selectedDesktopSource) {
       setIsPickingSource(true);
       return;
+    }
+
+    // If we already have a selected source, store it for the Recording page to consume.
+    if (needsDesktopSource && canPick && selectedDesktopSource) {
+      try {
+        sessionStorage.setItem(SELECTED_SOURCE_KEY, selectedDesktopSource.id);
+      } catch {
+        // ignore
+      }
     }
 
     // Browser fallback: rely on getDisplayMedia native picker.
@@ -158,9 +219,9 @@ export function RecordingModal({
     } catch {
       // ignore
     }
+    setSelectedDesktopSource(s);
+    writeLastDesktopPick(s);
     setIsPickingSource(false);
-    onClose();
-    onStartRecording();
   };
 
   return (
@@ -204,6 +265,68 @@ export function RecordingModal({
                   </TabsList>
                 </Tabs>
               </div>
+
+              {prefs.mode === "screen" || prefs.mode === "both" ? (
+                <div className="rounded-xl border bg-muted/20 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-xs text-muted-foreground">What to record</div>
+                      <div className="text-sm font-medium truncate">
+                        {selectedDesktopSource ? selectedDesktopSource.name : "Not selected"}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {!window.clickStudio?.getDesktopSources
+                          ? isElectronRuntime
+                            ? "Electron is running, but the desktop capture API isn’t available in this window (preload not loaded). You’ll use the system picker after clicking Start."
+                            : "You’re running the web app (not the desktop build), so we can’t list windows/screens here. You’ll use the system picker after clicking Start."
+                          : selectedDesktopSource
+                            ? selectedDesktopSource.id.startsWith("screen:")
+                              ? "Entire screen"
+                              : "Window"
+                            : "Pick a window or an entire screen before starting."}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setIsPickingSource(true)}
+                        disabled={!window.clickStudio?.getDesktopSources}
+                      >
+                        {selectedDesktopSource ? "Change" : "Choose"}
+                      </Button>
+                      {selectedDesktopSource ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setSelectedDesktopSource(null);
+                            try {
+                              localStorage.removeItem(LAST_SOURCE_PICK_KEY);
+                            } catch {
+                              // ignore
+                            }
+                          }}
+                        >
+                          Clear
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {window.clickStudio?.getDesktopSources && selectedDesktopSource?.thumbnailDataUrl ? (
+                    <div className="mt-3">
+                      <img
+                        src={selectedDesktopSource.thumbnailDataUrl}
+                        alt=""
+                        className="w-full rounded-lg border"
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               <Separator />
 
@@ -298,13 +421,23 @@ export function RecordingModal({
               </div>
 
               <div className="pt-2">
-                <Button className="w-full" size="lg" onClick={startRecording}>
+                <Button
+                  className="w-full"
+                  size="lg"
+                  onClick={startRecording}
+                  disabled={startDisabled}
+                >
                   Start recording
                 </Button>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  {window.clickStudio?.getDesktopSources &&
-                  (prefs.mode === "screen" || prefs.mode === "both")
-                    ? "Choose a window or screen, then the countdown starts."
+                  {prefs.mode === "screen" || prefs.mode === "both"
+                    ? canPickDesktopSource
+                      ? selectedDesktopSource
+                        ? "Source selected — the countdown starts when you click Start."
+                        : "Choose a window or screen above, then click Start."
+                      : mustPickInApp
+                        ? "Desktop capture API unavailable (preload not loaded). Source picking won’t work until that’s fixed."
+                        : "You’ll pick the window/screen in the next step."
                     : "You’ll pick the window/screen in the next step."}
                 </p>
               </div>
@@ -337,9 +470,60 @@ export function RecordingModal({
                           <span className="font-semibold">Capture preview</span>
                         </div>
                         <p className="text-sm text-white/60 max-w-sm">
-                          Screen preview appears after you choose a screen/window.
-                          Click “Start recording” to select what to capture.
+                          Choose a window or entire screen to record.
                         </p>
+                        {window.clickStudio?.getDesktopSources ? (
+                          <div className="pt-2 space-y-2">
+                            {selectedDesktopSource?.thumbnailDataUrl ? (
+                              <div className="mx-auto max-w-[360px]">
+                                <img
+                                  src={selectedDesktopSource.thumbnailDataUrl}
+                                  alt=""
+                                  className="w-full rounded-md border border-white/10"
+                                />
+                              </div>
+                            ) : null}
+                            {selectedDesktopSource ? (
+                              <div className="text-xs text-white/70">
+                                Selected:{" "}
+                                <span className="text-white/90 font-medium">
+                                  {selectedDesktopSource.name}
+                                </span>{" "}
+                                <span className="text-white/50">
+                                  ({selectedDesktopSource.id.startsWith("screen:") ? "Entire screen" : "Window"})
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="text-xs text-white/60">No source selected yet.</div>
+                            )}
+                            <div className="flex items-center justify-center gap-2">
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                onClick={() => setIsPickingSource(true)}
+                              >
+                                {selectedDesktopSource ? "Change source" : "Choose window/screen"}
+                              </Button>
+                              {selectedDesktopSource ? (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  className="text-white/80 hover:text-white"
+                                  onClick={() => {
+                                    setSelectedDesktopSource(null);
+                                    try {
+                                      localStorage.removeItem(LAST_SOURCE_PICK_KEY);
+                                    } catch {
+                                      // ignore
+                                    }
+                                  }}
+                                >
+                                  Clear
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ) : cameraPreviewStream ? (
@@ -384,6 +568,15 @@ export function RecordingModal({
                     <div className="mt-1">{prefs.frameRate} FPS</div>
                   </div>
                 </div>
+
+                {window.clickStudio?.getDesktopSources &&
+                (prefs.mode === "screen" || prefs.mode === "both") ? (
+                  <div className="mt-3 text-xs text-muted-foreground">
+                    {selectedDesktopSource
+                      ? "You’ve selected what to capture. Click “Start recording” to begin."
+                      : "Select a window or screen here, then click “Start recording” to begin."}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>

@@ -69,6 +69,7 @@ export class ScreenRecordingService {
   private viewportAtStart: { w: number; h: number } | null = null;
   private cleanupRecordingListeners: (() => void) | null = null;
   private usingGlobalClickCapture = false;
+  private recordedMimeType: string | null = null;
 
   private describeError(e: unknown) {
     const anyE = e as { name?: string; message?: string; stack?: string; code?: unknown };
@@ -94,13 +95,17 @@ export class ScreenRecordingService {
   }
 
   private pickSupportedMimeType(): string | undefined {
-    // Electron/macOS support varies by build; VP9 is commonly unsupported.
+    // Cross-browser support varies widely.
+    // - Electron/Chromium: typically WebM (VP8/VP9)
+    // - Safari: MediaRecorder may prefer MP4 (H.264/AAC) or have limited support
     const candidates = [
       "video/webm;codecs=vp9,opus",
       "video/webm;codecs=vp8,opus",
       "video/webm;codecs=vp9",
       "video/webm;codecs=vp8",
       "video/webm",
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4",
     ];
 
     if (typeof MediaRecorder === "undefined") return undefined;
@@ -170,13 +175,26 @@ export class ScreenRecordingService {
     };
   };
 
-  async startCameraRecording(options?: { audio?: boolean; video?: boolean }) {
+  async startCameraRecording(options?: {
+    audio?: boolean;
+    video?: boolean;
+    audioDeviceId?: string;
+    videoDeviceId?: string;
+  }) {
     try {
       const wantVideo = options?.video ?? true;
       const wantAudio = options?.audio ?? true;
       this.cameraStream = await navigator.mediaDevices.getUserMedia({
-        video: wantVideo,
-        audio: wantAudio,
+        video: wantVideo
+          ? options?.videoDeviceId
+            ? ({ deviceId: { exact: options.videoDeviceId } } as MediaTrackConstraints)
+            : true
+          : false,
+        audio: wantAudio
+          ? options?.audioDeviceId
+            ? ({ deviceId: { exact: options.audioDeviceId } } as MediaTrackConstraints)
+            : true
+          : false,
       });
       return this.cameraStream;
     } catch (error) {
@@ -187,6 +205,13 @@ export class ScreenRecordingService {
 
   async startRecording(stream: MediaStream, options?: RecordingOptions) {
     try {
+      if (typeof window === "undefined" || typeof document === "undefined") {
+        throw new Error("Recording can only start in a browser environment.");
+      }
+      if (typeof MediaRecorder === "undefined") {
+        throw new Error("MediaRecorder is not supported in this browser.");
+      }
+
       this.recordedChunks = [];
       this.recordedBlob = null;
       this.recordingVideoUrl = null;
@@ -200,6 +225,7 @@ export class ScreenRecordingService {
         w: window.innerWidth,
         h: window.innerHeight,
       };
+      this.recordedMimeType = null;
 
       let finalStream = stream;
 
@@ -232,6 +258,7 @@ export class ScreenRecordingService {
 
       try {
         this.mediaRecorder = new MediaRecorder(finalStream, recorderOptions);
+        this.recordedMimeType = this.mediaRecorder.mimeType || mimeType || null;
       } catch (e) {
         console.error("[recording] MediaRecorder constructor failed", {
           error: this.describeError(e),
@@ -402,8 +429,10 @@ export class ScreenRecordingService {
             this.cameraStream = null;
           }
 
-          this.recordedBlob = new Blob(this.recordedChunks, { type: 'video/webm' });
-          const fileName = this.generateFileName();
+          const mimeType = this.recordedMimeType || "video/webm";
+          const ext = mimeType.includes("mp4") ? "mp4" : "webm";
+          this.recordedBlob = new Blob(this.recordedChunks, { type: mimeType });
+          const fileName = this.generateFileName().replace(/\.webm$/i, `.${ext}`);
           
           // Create a URL for the blob that will be accessible in the editor
           this.recordingVideoUrl = URL.createObjectURL(this.recordedBlob);

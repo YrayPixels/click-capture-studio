@@ -91,15 +91,26 @@ function stopGlobalClickCapture() {
 }
 
 async function createWindow() {
+  const preloadPath = path.join(__dirname, "../preload/preload.cjs");
+  try {
+    await fs.access(preloadPath);
+  } catch (e) {
+    console.error("[preload] preload file not found at", preloadPath, e);
+  }
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      // electron-vite outputs preload as `preload.mjs` in dev.
-      preload: path.join(__dirname, "../preload/preload.mjs"),
+      // electron-vite outputs preload as `preload.cjs` (CommonJS).
+      preload: preloadPath,
     },
+  });
+
+  mainWindow.webContents.on("preload-error", (_event, preloadPath2, error) => {
+    console.error("[preload] error", { preloadPath: preloadPath2, error });
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -140,6 +151,19 @@ app.whenReady().then(async () => {
       console.error("[recording] setDisplayMediaRequestHandler failed", e);
       callback({});
     }
+  });
+
+  ipcMain.handle("desktop:sources", async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ["screen", "window"],
+      thumbnailSize: { width: 480, height: 270 },
+      fetchWindowIcons: true,
+    });
+    return sources.map((s) => ({
+      id: s.id,
+      name: s.name,
+      thumbnailDataUrl: s.thumbnail.toDataURL(),
+    }));
   });
 
   ipcMain.handle("clicks:status", () => {

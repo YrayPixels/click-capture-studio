@@ -24,8 +24,11 @@ export default defineConfig({
       },
       rollupOptions: {
         output: {
-          // Keep filename stable across dev/build to match `electron/main.ts`.
-          entryFileNames: "preload.mjs",
+          // Preload runs as CommonJS in Electron's sandboxed context.
+          // Build as CJS so Electron can execute it reliably.
+          format: "cjs",
+          exports: "named",
+          entryFileNames: "preload.cjs",
         },
       },
       outDir: "dist-electron/preload",

@@ -14,6 +14,8 @@ type RecordingPrefs = {
   micAudio: boolean;
   countdownSeconds: number;
   frameRate: number;
+  cameraDeviceId?: string;
+  micDeviceId?: string;
 };
 
 const PREFS_KEY = "click-studio-recording-prefs";
@@ -40,6 +42,8 @@ function readPrefs(): RecordingPrefs {
       micAudio: p.micAudio ?? true,
       countdownSeconds: p.countdownSeconds ?? 3,
       frameRate: p.frameRate ?? 60,
+      cameraDeviceId: p.cameraDeviceId,
+      micDeviceId: p.micDeviceId,
     };
   } catch {
     return {
@@ -48,6 +52,8 @@ function readPrefs(): RecordingPrefs {
       micAudio: true,
       countdownSeconds: 3,
       frameRate: 60,
+      cameraDeviceId: undefined,
+      micDeviceId: undefined,
     };
   }
 }
@@ -93,12 +99,17 @@ async function mixAudioToSingleTrack(streams: Array<MediaStream | null>): Promis
 export default function Recording() {
   const navigate = useNavigate();
   const prefs = React.useMemo(() => readPrefs(), []);
+  const isElectronRuntime =
+    typeof navigator !== "undefined" && navigator.userAgent?.includes("Electron");
   const [isCountingDown, setIsCountingDown] = React.useState(prefs.countdownSeconds > 0);
   const [isPaused, setIsPaused] = React.useState(false);
   const [duration, setDuration] = React.useState(0);
   const [stream, setStream] = React.useState<MediaStream | null>(null);
   const [cameraStream, setCameraStream] = React.useState<MediaStream | null>(null);
   const [micStream, setMicStream] = React.useState<MediaStream | null>(null);
+  const [recordingState, setRecordingState] = React.useState<
+    "idle" | "starting" | "recording" | "stopping"
+  >("idle");
   const intervalRef = React.useRef<number | null>(null);
   const [clickCount, setClickCount] = React.useState(0);
   const unsubscribeClicksRef = React.useRef<null | (() => void)>(null);
@@ -154,15 +165,27 @@ export default function Recording() {
     try {
       if (startedRef.current) return;
       startedRef.current = true;
+      setRecordingState("starting");
       let displayStream: MediaStream | null = null;
       let camStream: MediaStream | null = null;
       let microphoneStream: MediaStream | null = null;
       setClickCount(0);
 
       if (prefs.mode === "screen" || prefs.mode === "both") {
-        // Electron custom picker path: the modal stores the selected source id.
-        const selectedId = consumeSelectedDesktopSourceId();
-        if (selectedId && window.clickStudio?.getDesktopSources) {
+        if (!navigator.mediaDevices?.getDisplayMedia && !navigator.mediaDevices?.getUserMedia) {
+          throw new Error("Screen capture is not supported in this browser.");
+        }
+
+        // Electron: do not use getDisplayMedia (it won't show the browser picker).
+        // We require the in-app picker (DesktopSourcePicker) to provide a chromeMediaSourceId.
+        if (isElectronRuntime) {
+          const selectedId = consumeSelectedDesktopSourceId();
+          if (!selectedId) {
+            throw new Error("No window/screen selected. Go back and choose what to record.");
+          }
+          if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error("Screen capture (getUserMedia) is not available in this environment.");
+          }
           displayStream = await navigator.mediaDevices.getUserMedia({
             audio: false,
             video: {
@@ -174,11 +197,15 @@ export default function Recording() {
           });
         } else {
           // Browser fallback: native picker.
-          const displayMediaOptions = {
+          if (!navigator.mediaDevices?.getDisplayMedia) {
+            throw new Error("Screen capture (getDisplayMedia) is not available in this browser.");
+          }
+
+          // Keep constraints conservative for cross-browser compatibility (Safari/Firefox can reject
+          // extra fields like displaySurface/logicalSurface).
+          const displayMediaOptions: DisplayMediaStreamOptions = {
             video: {
-              displaySurface: "monitor" as DisplayCaptureSurfaceType,
-              logicalSurface: true,
-              frameRate: prefs.frameRate,
+              frameRate: { ideal: prefs.frameRate },
             },
             audio: prefs.systemAudio,
           };
@@ -191,6 +218,8 @@ export default function Recording() {
         camStream = await screenRecordingService.startCameraRecording({
           video: true,
           audio: prefs.micAudio,
+          videoDeviceId: prefs.cameraDeviceId,
+          audioDeviceId: prefs.micDeviceId,
         });
         setCameraStream(camStream);
       }
@@ -198,7 +227,9 @@ export default function Recording() {
       if (prefs.micAudio && (prefs.mode === "screen")) {
         try {
           microphoneStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
+            audio: prefs.micDeviceId
+              ? ({ deviceId: { exact: prefs.micDeviceId } } as MediaTrackConstraints)
+              : true,
             video: false,
           });
           setMicStream(microphoneStream);
@@ -272,8 +303,10 @@ export default function Recording() {
       
       setIsCountingDown(false);
       startTimer();
+      setRecordingState("recording");
     } catch (error) {
       startedRef.current = false;
+      setRecordingState("idle");
       const err = error as { name?: string; message?: string };
       console.error("Error starting recording:", error);
       toast.error(
@@ -304,10 +337,11 @@ export default function Recording() {
   };
 
   const handleStop = async () => {
-    if (!stream || !startedRef.current) {
+    if (recordingState !== "recording") {
       toast.error("Recording hasn't started yet.");
       return;
     }
+    setRecordingState("stopping");
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
@@ -369,7 +403,15 @@ export default function Recording() {
         <div className="absolute top-6 left-6 z-40 flex items-center gap-2">
           <div className={`h-2.5 w-2.5 rounded-full ${isCountingDown ? "bg-white/40" : isPaused ? "bg-amber-400" : "bg-red-500 animate-pulse"}`} />
           <Badge variant="secondary" className="bg-black/40 text-white border-white/10">
-            {isCountingDown ? "Starting…" : isPaused ? "Paused" : "Recording"}
+            {isCountingDown
+              ? "Starting…"
+              : recordingState === "starting"
+                ? "Starting…"
+                : recordingState === "stopping"
+                  ? "Saving…"
+                  : isPaused
+                    ? "Paused"
+                    : "Recording"}
           </Badge>
           {!isCountingDown ? (
             <Badge variant="outline" className="bg-black/30 text-white border-white/15 font-mono">

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, desktopCapturer } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 
 export type GlobalClickEvent = {
   t: number;
@@ -29,25 +29,8 @@ const api = {
     ipcRenderer.invoke("clicks:get") as Promise<GlobalClickEvent[]>,
   getGlobalClickStatus: () =>
     ipcRenderer.invoke("clicks:status") as Promise<{ running: boolean; lastError: string | null }>,
-  getDesktopSourceId: async () => {
-    const sources = await desktopCapturer.getSources({ types: ["screen", "window"] });
-    // Prefer full screen capture when available.
-    const screenSource = sources.find((s) => s.id.startsWith("screen:")) ?? sources[0];
-    if (!screenSource) throw new Error("No desktop capture sources available");
-    return screenSource.id;
-  },
   getDesktopSources: async () => {
-    const sources = await desktopCapturer.getSources({
-      types: ["screen", "window"],
-      thumbnailSize: { width: 480, height: 270 },
-      fetchWindowIcons: true,
-    });
-
-    return sources.map((s) => ({
-      id: s.id,
-      name: s.name,
-      thumbnailDataUrl: s.thumbnail.toDataURL(),
-    })) as DesktopSource[];
+    return (await ipcRenderer.invoke("desktop:sources")) as DesktopSource[];
   },
   saveRecording: async (suggestedName: string, data: Uint8Array) => {
     return (await ipcRenderer.invoke("recording:save", {

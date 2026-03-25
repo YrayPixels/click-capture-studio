@@ -14,8 +14,123 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
+
+type RecordingMode = "screen" | "camera" | "both";
+type RecordingPrefs = {
+  mode: RecordingMode;
+  systemAudio: boolean;
+  micAudio: boolean;
+  countdownSeconds: number;
+  frameRate: number;
+  cameraDeviceId?: string;
+  micDeviceId?: string;
+};
+
+const PREFS_KEY = "click-studio-recording-prefs";
+
+function readPrefs(): RecordingPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) throw new Error("missing");
+    const p = JSON.parse(raw) as Partial<RecordingPrefs>;
+    return {
+      mode: (p.mode ?? "screen") as RecordingMode,
+      systemAudio: p.systemAudio ?? true,
+      micAudio: p.micAudio ?? true,
+      countdownSeconds: p.countdownSeconds ?? 3,
+      frameRate: p.frameRate ?? 60,
+      cameraDeviceId: p.cameraDeviceId,
+      micDeviceId: p.micDeviceId,
+    };
+  } catch {
+    return {
+      mode: "screen",
+      systemAudio: true,
+      micAudio: true,
+      countdownSeconds: 3,
+      frameRate: 60,
+      cameraDeviceId: undefined,
+      micDeviceId: undefined,
+    };
+  }
+}
+
+function savePrefs(next: RecordingPrefs) {
+  localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+}
 
 export default function Settings() {
+  const [prefs, setPrefs] = React.useState<RecordingPrefs>(() => readPrefs());
+  const [cameras, setCameras] = React.useState<MediaDeviceInfo[]>([]);
+  const [mics, setMics] = React.useState<MediaDeviceInfo[]>([]);
+  const [isLoadingDevices, setIsLoadingDevices] = React.useState(false);
+
+  const refreshDevices = React.useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      toast.error("Your environment doesn’t support device enumeration.");
+      return;
+    }
+
+    setIsLoadingDevices(true);
+    try {
+      // Labels are often empty until the user grants permission at least once.
+      // We request permission briefly, then immediately stop tracks.
+      let permStream: MediaStream | null = null;
+      try {
+        permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      } catch {
+        // Permission denied or unavailable: still enumerate, but labels may be blank.
+      } finally {
+        permStream?.getTracks().forEach((t) => t.stop());
+      }
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setCameras(devices.filter((d) => d.kind === "videoinput"));
+      setMics(devices.filter((d) => d.kind === "audioinput"));
+    } catch (e) {
+      const err = e as { message?: string; name?: string };
+      toast.error(err?.message || err?.name || "Failed to load devices.");
+    } finally {
+      setIsLoadingDevices(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refreshDevices();
+  }, [refreshDevices]);
+
+  const updatePrefs = (patch: Partial<RecordingPrefs>) => {
+    setPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        savePrefs(next);
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  const resetRecordingDefaults = () => {
+    const next: RecordingPrefs = {
+      mode: "screen",
+      systemAudio: true,
+      micAudio: true,
+      countdownSeconds: 3,
+      frameRate: 60,
+      cameraDeviceId: undefined,
+      micDeviceId: undefined,
+    };
+    setPrefs(next);
+    try {
+      savePrefs(next);
+      toast.success("Recording settings reset.");
+    } catch {
+      toast.error("Failed to reset settings.");
+    }
+  };
+
   return (
     <div className="flex flex-col min-h-screen">
       <MainNav />
@@ -93,45 +208,105 @@ export default function Settings() {
                 <div className="grid grid-cols-2 gap-8">
                   <div className="space-y-2">
                     <Label>Default Camera</Label>
-                    <Select defaultValue="default">
+                    <Select
+                      value={prefs.cameraDeviceId ?? "default"}
+                      onValueChange={(v) =>
+                        updatePrefs({ cameraDeviceId: v === "default" ? undefined : v })
+                      }
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Select camera" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="default">Default Camera</SelectItem>
-                        <SelectItem value="webcam">External Webcam</SelectItem>
+                        <SelectItem value="default">System Default</SelectItem>
+                        {cameras.map((d, idx) => (
+                          <SelectItem key={d.deviceId} value={d.deviceId}>
+                            {d.label?.trim() ? d.label : `Camera ${idx + 1}`}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-muted-foreground">
+                        {cameras.length ? `${cameras.length} camera(s) found` : "No cameras found"}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={isLoadingDevices}
+                        onClick={() => void refreshDevices()}
+                      >
+                        Refresh
+                      </Button>
+                    </div>
                   </div>
                   
                   <div className="space-y-2">
                     <Label>Default Microphone</Label>
-                    <Select defaultValue="default">
+                    <Select
+                      value={prefs.micDeviceId ?? "default"}
+                      onValueChange={(v) =>
+                        updatePrefs({ micDeviceId: v === "default" ? undefined : v })
+                      }
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Select microphone" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="default">Default Microphone</SelectItem>
-                        <SelectItem value="headset">Headset Microphone</SelectItem>
+                        <SelectItem value="default">System Default</SelectItem>
+                        {mics.map((d, idx) => (
+                          <SelectItem key={d.deviceId} value={d.deviceId}>
+                            {d.label?.trim() ? d.label : `Microphone ${idx + 1}`}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-muted-foreground">
+                        {mics.length ? `${mics.length} microphone(s) found` : "No microphones found"}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={isLoadingDevices}
+                        onClick={() => void refreshDevices()}
+                      >
+                        Refresh
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label htmlFor="system-audio">Record System Audio</Label>
-                    <Switch id="system-audio" defaultChecked />
+                    <Switch
+                      id="system-audio"
+                      checked={prefs.systemAudio}
+                      onCheckedChange={(v) => updatePrefs({ systemAudio: v })}
+                    />
                   </div>
                   
                   <div className="flex items-center justify-between">
                     <Label htmlFor="mic-audio">Record Microphone</Label>
-                    <Switch id="mic-audio" defaultChecked />
+                    <Switch
+                      id="mic-audio"
+                      checked={prefs.micAudio}
+                      onCheckedChange={(v) => updatePrefs({ micAudio: v })}
+                    />
                   </div>
                   
                   <div className="flex items-center justify-between">
                     <Label htmlFor="countdown">Show Countdown</Label>
-                    <Switch id="countdown" defaultChecked />
+                    <Switch
+                      id="countdown"
+                      checked={prefs.countdownSeconds > 0}
+                      onCheckedChange={(v) =>
+                        updatePrefs({ countdownSeconds: v ? 3 : 0 })
+                      }
+                    />
                   </div>
                 </div>
               </div>
@@ -297,8 +472,16 @@ export default function Settings() {
           </Tabs>
           
           <div className="flex justify-end mt-8 space-x-4">
-            <Button variant="outline">Reset to Defaults</Button>
-            <Button className="bg-studio-blue hover:bg-studio-blue/90">Save Changes</Button>
+            <Button variant="outline" type="button" onClick={resetRecordingDefaults}>
+              Reset to Defaults
+            </Button>
+            <Button
+              type="button"
+              className="bg-studio-blue hover:bg-studio-blue/90"
+              onClick={() => toast.success("Saved.")}
+            >
+              Save Changes
+            </Button>
           </div>
         </div>
       </main>

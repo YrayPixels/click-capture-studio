@@ -27,7 +27,6 @@ declare global {
       stopGlobalClickCapture: () => Promise<GlobalClickEvent[]>;
       getGlobalClickEvents: () => Promise<GlobalClickEvent[]>;
       getGlobalClickStatus: () => Promise<{ running: boolean; lastError: string | null }>;
-      getDesktopSourceId: () => Promise<string>;
       getDesktopSources: () => Promise<DesktopSource[]>;
       saveRecording: (suggestedName: string, data: Uint8Array) => Promise<SaveRecordingResult>;
       openScreenRecordingPreferences: () => Promise<boolean>;
